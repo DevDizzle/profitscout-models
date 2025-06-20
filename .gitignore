@@ -1,0 +1,10 @@
+# don’t ship local crap into the container
+*.pyc
+__pycache__/
+.env
+.idea/
+.vscode/
+*.ipynb
+*.csv
+*.joblib
+*.json
