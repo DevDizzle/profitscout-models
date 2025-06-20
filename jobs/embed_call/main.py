@@ -99,7 +99,7 @@ def handler():
         return (str(e), 500)
     return ("", 204)
 
-# local CLI test: python main.py samples/call.txt AAPL 2025-03-31
+# local CLI test
 if __name__ == "__main__":
     import sys, pathlib
     txt, ticker, q = sys.argv[1:]
