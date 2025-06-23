@@ -1,6 +1,6 @@
-google-cloud-bigquery
-google-cloud-pubsub
-pandas
+# /home/user/profitscout-ml-pipeline/jobs/price_technicals/requirements.txt
+
+google-cloud-bigquery[pandas]
+pandas-ta
 python-dateutil
-requests
-tenacity
+numpy<2.0

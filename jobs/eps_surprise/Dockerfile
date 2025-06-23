@@ -4,8 +4,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# bring in shared helpers
-COPY ../../utils ../utils
 COPY . .
 
 ENV PYTHONUNBUFFERED=1

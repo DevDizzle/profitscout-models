@@ -1,135 +1,137 @@
 #!/usr/bin/env python3
 """
-Job 3 – price_technicals
-────────────────────────
-• Fetch SMA-20, EMA-50, RSI-14, ADX-14 from FMP
-• Compute 90-day deltas
-• UPSERT cols into profit_scout.breakout_features
-• Publish the untouched message to `eps-todo`
-"""
+Job: Price Techncials Feature Engineering
 
-import base64, json, logging, os, time
-from datetime import timedelta, date
-from typing import Any, Dict
+Part of a scheduled workflow. Fetches price data from BigQuery, calculates
+technical indicators, and upserts the results to a staging table.
+"""
+import logging
+import os
+import sys
+from datetime import timedelta
 
 import pandas as pd
-import requests
+import pandas_ta as ta
 from dateutil.parser import parse
-from flask import Flask, request
-from tenacity import retry, stop_after_attempt, wait_exponential
+from google.cloud import bigquery
 
-from utils import bq_client, table_ref, upsert_json
+from bq import bq_client, table_ref, upsert_json
+
+# Configure logging for Cloud Run Jobs
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # ──────────────────── CONFIG ──────────────────────────
-PROJECT_ID   = os.getenv("PROJECT_ID", "profitscout-lx6bb")
-DATASET      = os.getenv("BQ_DATASET",  "profit_scout")
-TABLE        = table_ref(DATASET, "breakout_features", PROJECT_ID)
-
-FMP_KEY      = os.environ["FMP_API_KEY"]          # must be set!
-WINDOW_DAYS  = int(os.getenv("WINDOW_DAYS", 90))  # pct-∆ window
-TOPIC_OUT    = os.getenv("TOPIC_OUT", "eps-todo") # next hop
-
-INDICATORS = {                                   # label → spec
-    "sma_20": {"type": "sma", "field": "sma", "period": 20},
-    "ema_50": {"type": "ema", "field": "ema", "period": 50},
-    "rsi_14": {"type": "rsi", "field": "rsi", "period": 14},
-    "adx_14": {"type": "adx", "field": "adx", "period": 14},
-}
+PROJECT_ID    = os.getenv("PROJECT_ID", "profitscout-lx6bb")
+DATASET       = os.getenv("BQ_DATASET", "profit_scout")
+STAGING_TABLE = os.getenv("STAGING_TABLE", "call_feats_staging")
+TABLE         = table_ref(DATASET, STAGING_TABLE, PROJECT_ID)
+PRICE_TABLE   = table_ref(DATASET, "price_data", PROJECT_ID)
+WINDOW_DAYS   = int(os.getenv("WINDOW_DAYS", 90))
 
 # ──────────────────── GLOBALS ─────────────────────────
-bq        = bq_client(PROJECT_ID)
-publisher = None  # will be lazy-imported to avoid heavy client at cold-start
-app       = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+bq = bq_client(PROJECT_ID)
 
-# ──────────────────── HELPERS ─────────────────────────
-class Limiter:
-    """≤ 45 requests / 60 s (FMP free-tier limit)."""
-    def __init__(self, r=45, p=60):
-        self.r, self.p, self.ts = r, p, []
+# ──────────────────── CORE LOGIC ──────────────────────
+def process(msg: dict):
+    """Fetches price data, calculates features, and upserts to BigQuery."""
+    ticker = msg["ticker"]
+    qend = msg["quarter_end"]
+    call_date = parse(msg["earnings_call_date"]).date()
 
-    def hit(self):
-        now = time.time()
-        self.ts = [t for t in self.ts if now - t < self.p]
-        if len(self.ts) >= self.r:
-            time.sleep(self.p - (now - self.ts[0]))
-        self.ts.append(now)
+    logging.info(f"Processing {ticker} for call date {call_date}...")
 
-lim = Limiter()
+    # 1. Fetch historical price data from our BigQuery table
+    query = f"""
+    SELECT
+        DATE(date) AS date,
+        adj_close, high, low, close, volume
+    FROM `{PRICE_TABLE}`
+    WHERE ticker = @ticker
+      AND DATE(date) BETWEEN @start_date AND @end_date  
+    ORDER BY date
+    """
+    params = [
+        bigquery.ScalarQueryParameter("ticker", "STRING", ticker),
+        bigquery.ScalarQueryParameter("start_date", "DATE", call_date - timedelta(days=150)),
+        bigquery.ScalarQueryParameter("end_date", "DATE", call_date + timedelta(days=31)),
+    ]
+    job_cfg = bigquery.QueryJobConfig(query_parameters=params)
+    df = bq.query(query, job_cfg).to_dataframe()
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-def _get(url: str) -> Any:
-    lim.hit()
-    r = requests.get(f"{url}&apikey={FMP_KEY}", timeout=20)
-    r.raise_for_status()
-    return r.json()
+    if df.empty:
+        logging.warning(f"No price data found for {ticker} around {call_date}. Skipping.")
+        return
 
-def fetch_indicator(sym: str, typ: str, period: int | None = None):
-    url = f"https://financialmodelingprep.com/api/v3/technical_indicator/daily/{sym}?type={typ}"
-    if period:
-        url += f"&period={period}"
-    return _get(url)
+    df['date'] = pd.to_datetime(df['date']).dt.date
 
-def nearest(series, target_dt: date, field: str):
-    """Latest ≤ target_dt where field is not null."""
-    vals = [(parse(r["date"]).date(), r.get(field)) for r in series if r.get(field) is not None]
-    vals = [v for v in vals if v[0] <= target_dt]
-    return max(vals, default=(None, None))[1]
+    # 2. Calculate all technical indicators
+    df.ta.sma(length=20, append=True)
+    df.ta.ema(length=50, append=True)
+    df.ta.rsi(length=14, append=True)
+    df.ta.adx(length=14, append=True)
 
-def pct_delta(series, target_dt: date, field: str, days: int):
-    v_now = nearest(series, target_dt, field)
-    v_prev = nearest(series, target_dt - timedelta(days=days), field)
-    if v_now is None or v_prev is None or abs(v_prev) < 1e-12:
-        return None
-    return (v_now - v_prev) / abs(v_prev)
+    # 3. Find values on the anchor dates safely
+    row_now_df = df[df['date'] <= call_date]
+    row_prev_df = df[df['date'] <= call_date - timedelta(days=WINDOW_DAYS)]
 
-# ──────────────────── CORE ────────────────────────────
-def process(msg: Dict[str, Any]):
-    """msg keys expected: ticker, quarter_end, earnings_call_date (optional)."""
-    ticker = msg["ticker"].upper()
-    call_d = parse(msg.get("earnings_call_date") or msg["quarter_end"]).date()
+    if row_now_df.empty or row_prev_df.empty:
+        logging.warning(f"Not enough historical data to calculate indicators for {ticker} on {call_date}. Skipping.")
+        return
 
-    # 1) pull all four indicators in parallel
-    ind_json = {
-        k: fetch_indicator(ticker, spec["type"], spec.get("period"))
-        for k, spec in INDICATORS.items()
+    row_now_series = row_now_df.iloc[-1]
+    row_prev_series = row_prev_df.iloc[-1]
+
+    def pct_delta(now, prev):
+        if pd.isna(now) or pd.isna(prev) or prev == 0:
+            return None
+        return (now - prev) / prev
+
+    # 4. Calculate future price features
+    window_30d = df[(df['date'] > call_date) & (df['date'] <= call_date + timedelta(days=30))]
+    adj_close_30d = None
+    max_close_30d = None
+    if not window_30d.empty:
+        future_date_target = call_date + timedelta(days=30)
+        future_row = window_30d[window_30d['date'] == future_date_target]
+        if not future_row.empty:
+            adj_close_30d = future_row['adj_close'].iloc[0]
+        max_close_30d = window_30d['adj_close'].max()
+
+    # 5. Build the row for BigQuery
+    final_row = {
+        "ticker": ticker, "quarter_end_date": qend, "earnings_call_date": call_date.isoformat(),
+        "adj_close_30d": adj_close_30d, "max_close_30d": max_close_30d,
+        "sma_20": row_now_series.get("SMA_20"), "ema_50": row_now_series.get("EMA_50"),
+        "rsi_14": row_now_series.get("RSI_14"), "adx_14": row_now_series.get("ADX_14"),
+        "sma_20_delta": pct_delta(row_now_series.get("SMA_20"), row_prev_series.get("SMA_20")),
+        "ema_50_delta": pct_delta(row_now_series.get("EMA_50"), row_prev_series.get("EMA_50")),
+        "rsi_14_delta": pct_delta(row_now_series.get("RSI_14"), row_prev_series.get("RSI_14")),
+        "adx_14_delta": pct_delta(row_now_series.get("ADX_14"), row_prev_series.get("ADX_14")),
     }
 
-    # 2) build row
-    row: Dict[str, Any] = {"ticker": ticker, "quarter_end_date": msg["quarter_end"]}
-    for lbl, spec in INDICATORS.items():
-        fld = spec["field"]
-        row[lbl]             = nearest(ind_json[lbl], call_d, fld)
-        row[f"{lbl}_delta"]  = pct_delta(ind_json[lbl], call_d, fld, WINDOW_DAYS)
+    # 6. Upsert data to the staging table
+    upsert_json(TABLE, final_row, bq)
+    logging.info(f"Successfully upserted technicals to staging for {ticker} {qend}")
 
-    # 3) UPSERT
-    upsert_json(TABLE, row, bq)
-    logging.info("Updated technicals for %s %s", ticker, msg["quarter_end"])
-
-    # 4) hand off to EPS job
-    global publisher
-    if publisher is None:
-        from google.cloud import pubsub_v1
-        publisher = pubsub_v1.PublisherClient()
-    publisher.publish(f"projects/{PROJECT_ID}/topics/{TOPIC_OUT}",
-                      json.dumps(msg).encode())
-
-# ──────────────────── FLASK HANDLER ───────────────────
-@app.route("/", methods=["POST"])
-def handle():
-    envelope = request.get_json()
-    if not envelope or "message" not in envelope:
-        return ("Bad Request", 400)
-
-    payload = json.loads(base64.b64decode(envelope["message"]["data"]))
-    process(payload)
-    return ("", 204)
-
-# local dev:  python main.py AAPL 2025-03-31 2025-04-25
+# ──────────────────── JOB ENTRYPOINT ───────────────────
 if __name__ == "__main__":
-    import sys
-    process({
-        "ticker":        sys.argv[1],
-        "quarter_end":   sys.argv[2],
-        "earnings_call_date": sys.argv[3] if len(sys.argv) > 3 else sys.argv[2],
-    })
+    # This block is the entrypoint for the Cloud Run Job.
+    # It reads command-line arguments to get the job's parameters.
+    if len(sys.argv) < 4:
+        logging.error("FATAL: Invalid arguments. Usage: <script> TICKER QUARTER_END_DATE EARNINGS_CALL_DATE")
+        sys.exit(1)
+
+    payload = {
+        "ticker": sys.argv[1],
+        "quarter_end": sys.argv[2],
+        "earnings_call_date": sys.argv[3],
+    }
+
+    logging.info(f"Starting job with payload: {payload}")
+    try:
+        process(payload)
+        logging.info("Job completed successfully.")
+    except Exception as e:
+        logging.error(f"Job failed with error: {e}", exc_info=True)
+        # Exit with a non-zero status code to mark the job execution as FAILED
+        sys.exit(1)

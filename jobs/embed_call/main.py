@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Job 1: build Gemini embeddings for each markdown section
 Publishes the *same* message to the next topic when done.
