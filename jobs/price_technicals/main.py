@@ -42,12 +42,16 @@ def process(msg: dict):
 
     # 1. Fetch historical price data from our BigQuery table
     query = f"""
-    SELECT
-        DATE(date) AS date,
-        adj_close, high, low, close, volume
+     SELECT
+        DATE(date)                AS date,        
+        adj_close,                               
+        high,
+        low,
+        adj_close               AS close,       
+        volume
     FROM `{PRICE_TABLE}`
     WHERE ticker = @ticker
-      AND DATE(date) BETWEEN @start_date AND @end_date  
+      AND DATE(date) BETWEEN @start_date AND @end_date
     ORDER BY date
     """
     params = [
