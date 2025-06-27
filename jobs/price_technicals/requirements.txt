@@ -1,6 +1,0 @@
-# /home/user/profitscout-ml-pipeline/jobs/price_technicals/requirements.txt
-
-google-cloud-bigquery[pandas]
-pandas-ta
-python-dateutil
-numpy<2.0

@@ -1,8 +1,0 @@
-flask
-gunicorn
-google-cloud-bigquery
-google-cloud-pubsub
-google-cloud-storage
-google-cloud-aiplatform 
-vertexai>=1.44.0
-pandas

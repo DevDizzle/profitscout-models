@@ -1,0 +1,9 @@
+Flask
+gunicorn
+pandas
+pandas-ta
+requests
+google-cloud-storage
+google-cloud-bigquery
+google-cloud-aiplatform
+google-cloud-language==2.9.1
