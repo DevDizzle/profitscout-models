@@ -20,8 +20,8 @@ def discover_new_transcripts(event, context):
     Cloud Function to discover new earnings call transcripts in GCS
     and publish a message to Pub/Sub for processing.
     """
-    logging.info(f"Listing blobs in bucket: {BUCKET_NAME} with prefix 'earnings-call-summary/'")
-    blobs = storage_client.list_blobs(BUCKET_NAME, prefix='earnings-call-summary/')
+    logging.info(f"Listing blobs in bucket: {BUCKET_NAME} with prefix 'earnings-call-summaries/'")
+    blobs = storage_client.list_blobs(BUCKET_NAME, prefix='earnings-call-summaries/')
     
     # Get a set of already processed tickers and dates for quick lookup
     try:
@@ -40,31 +40,31 @@ def discover_new_transcripts(event, context):
             continue
 
         try:
-            # Extract Ticker and Quarter End Date from filename like 'AAPL_2023-12-31.txt'
+            # Extract Ticker and Quarter End Date
             filename = os.path.basename(blob.name)
             ticker, q_end_str = os.path.splitext(filename)[0].rsplit('_', 1)
             
-            # Create a unique key to check if it's already processed
             item_key = f"{ticker}_{q_end_str}"
-
             if item_key in processed_items:
                 continue
 
             logging.info(f"Found new item: {item_key}. Publishing to {PUB_SUB_TOPIC}")
 
+            # CORRECTED PATHS in the message payload
             message_data = {
                 "ticker": ticker,
                 "quarter_end_date": q_end_str,
                 "summary_gcs_path": f"gs://{BUCKET_NAME}/{blob.name}",
-                "transcript_gcs_path": f"gs://{BUCKET_NAME}/earnings-call/json/{ticker}_{q_end_str}.json"
+                "transcript_gcs_path": f"gs://{BUCKET_NAME}/earnings-call-transcripts/{ticker}_{q_end_str}.json"
             }
             
             # Publish message to Pub/Sub
-            future = publisher.publish(PUB_SUB_TOPIC, data=str(message_data).encode('utf-8'))
-            future.result() # Wait for publish to complete
+            future = publisher.publish(PUB_SUB_TOPIC, data=json.dumps(message_data).encode('utf-8'))
+            future.result()
 
         except Exception as e:
             logging.error(f"Failed to process or publish for blob {blob.name}: {e}")
 
     logging.info("Discovery function finished.")
     return 'OK', 200
+    
