@@ -1,0 +1,34 @@
+### Key Financial Metrics
+*   **Revenue**: $5.87B, +11% YoY, record revenue.
+*   **GAAP EPS**: $3.94, +13% YoY.
+*   **Non-GAAP EPS**: $5.06, +13% YoY.
+*   **Digital Media Revenue**: $4.35B, +12% YoY.
+*   **Digital Experience Revenue**: $1.46B, +10% YoY.
+*   **Digital Experience Subscription Revenue**: $1.33B, +11% YoY.
+*   **Cash Flows from Operations**: $2.19B, record for Q2.
+
+### Key Discussion Points
+*   **Shantanu Narayen** – Outlined growth strategy centered on delivering transformative innovation, with AI as an accelerant.
+*   **David Wadhwani** – Noted strong performance in Business Professionals and Consumers group, with combined monthly active user growth accelerating to over 25% YoY.
+*   **Anil Chakravarthy** – Highlighted customer experience orchestration strategy, enabling personalized conversational digital experiences in real time at global scale.
+*   **Strategic Initiative**: Accelerated adoption of Express creative functionality through Acrobat, driving approximately 11x YoY growth of monthly active users.
+*   **Operational Highlight**: Acrobat AI assistant engagement continues to accelerate, with the number of questions asked nearly doubling quarter over quarter.
+*   **Analyst** – Noted "congratulations on the beat and raise performance," affirming positive results.
+
+### Sentiment Tone
+*   Positive, driven by strong Q2 performance, raised FY25 targets, and confident management remarks.
+*   Shift from prior quarters is inferred from the "beat and raise performance" comment from an analyst, suggesting prior performance was not as strong.
+*   Drivers: EPS beat, revenue growth, and positive outlook on AI monetization.
+
+### Short-Term Outlook
+*   Positive outlook driven by raised FY25 revenue and EPS targets, strong growth in Digital Media and Digital Experience, and increasing adoption of AI-powered offerings.
+*   Guidance: Raised FY25 total revenue and EPS targets.
+*   Macro: Assumes current macroeconomic conditions.
+
+### Forward-Looking Signals
+*   **Guidance**: FY25 total Adobe revenue targeted at $23.5 to $23.6 billion, raised from prior guidance.
+*   **Guidance**: FY25 non-GAAP EPS targeted at $20.5 to $20.7, raised from prior guidance.
+*   **Liquidity**: $5.71B cash and short-term investments exiting Q2.
+*   **Capital Allocation**: Entered into a share repurchase agreement totaling $3.5 billion.
+*   **AI Monetization**: On pace to surpass $250 million in AI Direct ARR book of business exiting the year.
+*   **Q&A Insight**: Shantanu noted, "We're really pleased with the first half performance," signaling confidence in future results.

@@ -1,7 +1,7 @@
 import logging
 from google.cloud import bigquery
 import json
-import re # FIX #3: Import the regular expression module
+import re
 
 # Initialize BigQuery Client
 bq_client = bigquery.Client()
@@ -14,8 +14,15 @@ def _format_value(value):
         return str(value).upper()
     if isinstance(value, list):
         return f"[{','.join(map(str, value))}]"
-    if isinstance(value, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', value):
-        return f"CAST('{value}' AS DATE)"
+    
+    # FIX: This now handles both date and datetime strings correctly.
+    # It extracts only the date portion from the string before casting.
+    if isinstance(value, str) and re.match(r'^\d{4}-\d{2}-\d{2}', value):
+        # Take only the date part of the string (e.g., '2025-05-01')
+        date_part = value.split(' ')[0]
+        escaped_date_part = date_part.replace("'", "''")
+        return f"CAST('{escaped_date_part}' AS DATE)"
+
     escaped = str(value).replace("'", "''")
     return f"'{escaped}'"
 
@@ -25,7 +32,7 @@ def upsert_row(row: dict, table_id: str, primary_keys: list):
     by constructing a safe SQL query string.
     """
     logging.info(f"Upserting row into {table_id}")
-    query = "" # FIX #4: Initialize query to prevent UnboundLocalError
+    query = ""
     try:
         valid_row_items = {k: v for k, v in row.items() if v is not None}
         
