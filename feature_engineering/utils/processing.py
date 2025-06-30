@@ -4,16 +4,28 @@ import logging
 import requests
 import pandas as pd
 import pandas_ta as ta
-from google.cloud import storage, aiplatform, language_v1
+from google.cloud import storage, aiplatform, language_v1, bigquery, secretmanager
 from vertexai.language_models import TextEmbeddingModel
+from . import bq  # Correctly import the bq module
 
 # Initialize clients
 storage_client = storage.Client()
 aiplatform.init(project=os.environ.get('PROJECT_ID'), location='us-central1')
 embedding_model = TextEmbeddingModel("textembedding-gecko@001")
 language_client = language_v1.LanguageServiceClient()
+secret_client = secretmanager.SecretManagerServiceClient()
 
 logging.basicConfig(level=logging.INFO)
+
+def get_fmp_api_key():
+    """Fetches the FMP API key from Secret Manager."""
+    try:
+        name = "projects/profitscout-lx6bb/secrets/FMP_API_KEY/versions/latest"
+        response = secret_client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8")
+    except Exception as e:
+        logging.error(f"Failed to fetch FMP_API_KEY from Secret Manager: {e}")
+        return None
 
 def _parse_sections(markdown_text):
     """Splits markdown text into predefined sections."""
@@ -81,6 +93,9 @@ def get_sentiment_and_date(transcript_gcs_path: str) -> dict:
 
 def get_eps_surprise(fmp_api_key: str, ticker: str) -> dict:
     """Fetches EPS surprise from FinancialModelingPrep API."""
+    if not fmp_api_key:
+        logging.error("FMP API Key is missing, cannot fetch EPS surprise.")
+        return {"eps_surprise": None, "eps_missing": True}
     try:
         url = f"https://financialmodelingprep.com/api/v3/earnings-surprises/{ticker}?apikey={fmp_api_key}"
         response = requests.get(url)
@@ -96,12 +111,12 @@ def get_eps_surprise(fmp_api_key: str, ticker: str) -> dict:
         logging.error(f"Failed to get EPS surprise for {ticker}: {e}")
         return {"eps_surprise": None, "eps_missing": True}
 
-
 def get_price_technicals(ticker: str, earnings_call_date: str) -> dict:
     """Queries BigQuery for price data and calculates technical indicators."""
     try:
-        price_table = os.environ.get('PRICE_TABLE') # e.g., project.dataset.price_data
-        
+        price_table = os.environ.get('PRICE_TABLE')
+        call_date_only = earnings_call_date.split(' ')[0]
+
         query = f"""
         SELECT date, adj_close FROM `{price_table}`
         WHERE ticker = @ticker AND date <= @call_date
@@ -111,26 +126,26 @@ def get_price_technicals(ticker: str, earnings_call_date: str) -> dict:
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("ticker", "STRING", ticker),
-                bigquery.ScalarQueryParameter("call_date", "DATE", earnings_call_date),
+                bigquery.ScalarQueryParameter("call_date", "DATE", call_date_only),
             ]
         )
-        df = bq_client.query(query, job_config=job_config).to_dataframe().set_index('date').sort_index()
+        df = bq.bq_client.query(query, job_config=job_config).to_dataframe().set_index('date').sort_index()
 
         if df.empty:
-            logging.warning(f"No price data found for {ticker} on or before {earnings_call_date}")
+            logging.warning(f"No price data found for {ticker} on or before {call_date_only}")
             return {}
 
-        # Calculate indicators
         df.ta.sma(length=20, append=True)
         df.ta.ema(length=50, append=True)
         df.ta.rsi(length=14, append=True)
         df.ta.adx(length=14, append=True)
 
-        # Get the latest row (on the earnings call date)
         latest = df.iloc[-1]
-        
-        # Get the previous day's indicators for delta calculation
         previous = df.iloc[-2] if len(df) > 1 else latest
+
+        # FIX #2: Safely calculate deltas only if both values are not None
+        def safe_delta(latest_val, prev_val):
+            return latest_val - prev_val if latest_val is not None and prev_val is not None else None
 
         return {
             "adj_close_on_call_date": latest['adj_close'],
@@ -138,20 +153,17 @@ def get_price_technicals(ticker: str, earnings_call_date: str) -> dict:
             "ema_50": latest.get('EMA_50'),
             "rsi_14": latest.get('RSI_14'),
             "adx_14": latest.get('ADX_14'),
-            "sma_20_delta": latest.get('SMA_20') - previous.get('SMA_20'),
-            "ema_50_delta": latest.get('EMA_50') - previous.get('EMA_50'),
-            "rsi_14_delta": latest.get('RSI_14') - previous.get('RSI_14'),
-            "adx_14_delta": latest.get('ADX_14') - previous.get('ADX_14'),
+            "sma_20_delta": safe_delta(latest.get('SMA_20'), previous.get('SMA_20')),
+            "ema_50_delta": safe_delta(latest.get('EMA_50'), previous.get('EMA_50')),
+            "rsi_14_delta": safe_delta(latest.get('RSI_14'), previous.get('RSI_14')),
+            "adx_14_delta": safe_delta(latest.get('ADX_14'), previous.get('ADX_14')),
         }
     except Exception as e:
         logging.error(f"Failed to get price technicals for {ticker}: {e}")
         return {}
-
-
-def create_features(message: dict, fmp_api_key: str) -> dict:
-    """
-    Main orchestration function to generate all features for a given earnings call.
-    """
+def create_features(message: dict) -> dict:
+    """Main orchestration function to generate all features for a given earnings call."""
+    fmp_api_key = get_fmp_api_key()
     ticker = message.get("ticker")
     quarter_end_date = message.get("quarter_end_date")
     summary_gcs_path = message.get("summary_gcs_path")

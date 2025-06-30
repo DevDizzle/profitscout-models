@@ -5,9 +5,8 @@ import logging
 from flask import Flask, request
 from utils import processing, bq
 
-# Environment Variables
+# We no longer need the FMP_API_KEY environment variable
 PROJECT_ID = os.environ.get('PROJECT_ID')
-FMP_API_KEY = os.environ.get('FMP_API_KEY')
 DESTINATION_TABLE = os.environ.get('DESTINATION_TABLE')
 
 app = Flask(__name__)
@@ -28,25 +27,20 @@ def process_pubsub_message():
     logging.info(f"Received message: {message}")
 
     try:
-        # Decode the message payload
         data_str = base64.b64decode(message['data']).decode('utf-8').replace("'", "\"")
         data = json.loads(data_str)
         
         logging.info(f"Processing data: {data}")
 
         # --- Main Orchestration ---
-        # 1. Run the entire feature engineering process
-        final_row = processing.create_features(
-            message=data, 
-            fmp_api_key=FMP_API_KEY
-        )
+        # ** THE FIX IS HERE: **
+        # We now call create_features with only the message data.
+        final_row = processing.create_features(message=data)
 
         if not final_row:
-            # A critical error occurred in processing, acknowledge and stop
             logging.error(f"Feature creation failed for {data.get('ticker')}")
             return 'Processing failed', 200 
 
-        # 2. Upsert the final, complete row to BigQuery
         bq.upsert_row(
             row=final_row,
             table_id=DESTINATION_TABLE,
@@ -54,13 +48,10 @@ def process_pubsub_message():
         )
         
         logging.info(f"Successfully processed and loaded data for {data.get('ticker')}")
-
-        # Acknowledge the message so Pub/Sub doesn't resend it
         return 'Success', 204
 
     except Exception as e:
         logging.error(f"FATAL: Unhandled exception: {e}")
-        # Return a 500 error to signal Pub/Sub to retry the message
         return 'Internal Server Error', 500
 
 if __name__ == '__main__':

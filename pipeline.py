@@ -16,10 +16,10 @@ TRAINER_IMAGE_URI = (
     f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/trainer:latest"
 )
 
-# Real table names
+# BigQuery tables / dataset
 SOURCE_TABLE = "profit_scout.breakout_features"
 METADATA_TABLE = "profit_scout.stock_metadata"
-PREDICTION_DESTINATION_TABLE = "profit_scout"
+PREDICTION_DESTINATION_TABLE = "profit_scout"  # dataset only → Vertex creates the table
 
 # ─── Pipeline Definition ────────────────────────────────────────────
 @dsl.pipeline(
@@ -33,7 +33,7 @@ def profitscout_pipeline(
     prediction_destination: str = PREDICTION_DESTINATION_TABLE,
     base_output_dir: str = BASE_OUTPUT_DIR,
 ):
-    # 1. Custom training job
+    # 1. Training
     train_op = CustomTrainingJobOp(
         project=PROJECT_ID,
         location=REGION,
@@ -54,9 +54,9 @@ def profitscout_pipeline(
         base_output_directory=base_output_dir,
     )
 
-    # 2. Import the unmanaged model artifact from the known GCS path
+    # 2. Import model artifacts in GCS as an unmanaged model
     import_model_op = importer(
-        artifact_uri=base_output_dir,  # use the same GCS dir you set above
+        artifact_uri=base_output_dir,
         artifact_class=artifact_types.UnmanagedContainerModel,
         metadata={
             "containerSpec": {
@@ -65,7 +65,7 @@ def profitscout_pipeline(
         },
     ).after(train_op)
 
-    # 3. Upload the model to Vertex AI Model Registry
+    # 3. Upload to Vertex AI Model Registry
     model_upload_op = ModelUploadOp(
         project=PROJECT_ID,
         location=REGION,
@@ -79,7 +79,7 @@ def profitscout_pipeline(
         location=REGION,
         job_display_name="profitscout-batch-prediction",
         model=model_upload_op.outputs["model"],
-        bigquery_source=f"bq://{PROJECT_ID}.{source_table}",
+        bigquery_source_input_uri=f"bq://{PROJECT_ID}.{source_table}",  # FIXED
         bigquery_destination_output_uri=f"bq://{PROJECT_ID}.{prediction_destination}",
         instances_format="bigquery",
         predictions_format="bigquery",
