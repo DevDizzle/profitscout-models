@@ -5,8 +5,8 @@ from google.cloud import storage, pubsub_v1, bigquery
 # Environment Variables
 PROJECT_ID = os.environ.get('PROJECT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME')
-DESTINATION_TABLE = os.environ.get('DESTINATION_TABLE') # e.g., project.dataset.breakout_features
-PUB_SUB_TOPIC = os.environ.get('PUB_SUB_TOPIC') # e.g., projects/your-project/topics/process-earnings-call
+DESTINATION_TABLE = os.environ.get('DESTINATION_TABLE') #
+PUB_SUB_TOPIC = os.environ.get('PUB_SUB_TOPIC') 
 
 # Clients
 storage_client = storage.Client()

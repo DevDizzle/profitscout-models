@@ -1,9 +1,10 @@
 # ───────────────────────── imports ─────────────────────────
-import os, json, logging, re, requests
+import os, json, logging, re, requests, textwrap
 import pandas as pd, pandas_ta as ta
+from typing import Optional
 from google.cloud import storage, aiplatform, language_v1, bigquery, secretmanager
-from vertexai.language_models import TextEmbeddingModel             
-from . import bq                                                     
+from vertexai.language_models import TextEmbeddingModel
+from . import bq
 
 # ───────────────────────── init ────────────────────────────
 PROJECT_ID = os.environ.get("PROJECT_ID")
@@ -27,14 +28,16 @@ def get_fmp_api_key() -> str | None:
 
 
 SECTION_PATTERNS = {
-    "key_financial_metrics"  : re.compile(r"^#{1,6}\s*Key Financial Metrics\s*:?",  re.I),
-    "key_discussion_points"  : re.compile(r"^#{1,6}\s*Key Discussion Points\s*:?",  re.I),
-    "sentiment_tone"         : re.compile(r"^#{1,6}\s*Sentiment Tone\s*:?",         re.I),
-    "short_term_outlook"     : re.compile(r"^#{1,6}\s*Short\-?Term Outlook\s*:?",   re.I),
-    "forward_looking_signals": re.compile(r"^#{1,6}\s*Forward\-?Looking Signals\s*:?", re.I),
+    # matches:  optional spaces  (# ### etc.) OR (**)  then heading text
+    'key_financial_metrics'  : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Key Financial Metrics\b.*',  re.I),
+    'key_discussion_points'  : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Key Discussion Points\b.*',  re.I),
+    'sentiment_tone'         : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Sentiment Tone\b.*',         re.I),
+    'short_term_outlook'     : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Short\-?Term Outlook\b.*',   re.I),
+    'forward_looking_signals': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Forward\-?Looking Signals\b.*', re.I),
 }
 
 def _parse_sections(md: str) -> dict:
+    """Return a dict of section_name → text."""
     sections = {k: "" for k in SECTION_PATTERNS}
     current  = None
     for line in md.splitlines():
@@ -42,30 +45,47 @@ def _parse_sections(md: str) -> dict:
         current = hit or current
         if current and hit is None:
             sections[current] += line + "\n"
+    
+    # ADDED LOGGING
+    logging.info("Parsed sections from summary markdown:")
+    for k, v in sections.items():
+        logging.info("  %-25s -> %4d chars", k, len(v.strip()))
+        sample = textwrap.shorten(v.strip().replace("\n", " "), width=120) or "(blank)"
+        logging.debug("    Sample: %s", sample) # Use logging.debug for more verbose output
     return sections
 
 
 def get_embeddings(summary_gcs_path: str) -> dict:
     """Download summary markdown, embed each section, INFO-log vector length & sample."""
+    logging.info("Starting embedding generation for: %s", summary_gcs_path)
     try:
         bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
         text = storage_client.bucket(bucket).blob(blob).download_as_text()
+        logging.info("Successfully downloaded summary file.")
+        
         sections, results = _parse_sections(text), {}
 
         for sec, txt in sections.items():
-            if txt.strip():
-                emb = embedding_model.get_embeddings([txt])[0]     # ← no task_type
+            txt = txt.strip()
+            if txt:
+                logging.info("Generating embedding for section: %s", sec)
+                # Note: Ensure the Gemini model you're using doesn't require the `task_type` parameter.
+                # The "gemini-embedding-001" model does not.
+                emb = embedding_model.get_embeddings([txt])[0]
                 vec = list(emb.values)
                 results[f"{sec}_embedding"] = vec
-
-                # sanity log
+                
+                # This is the detailed log you wanted to see
                 logging.info("Embedded %s | len=%d | first5=%s", sec, len(vec), vec[:5])
             else:
+                # This will clearly log if a section is being skipped
+                logging.warning("Section '%s' is empty. Skipping embedding.", sec)
                 results[f"{sec}_embedding"] = None
 
         return results
     except Exception as e:
-        logging.error("get_embeddings: %s", e)
+        # Log the full error if something goes wrong during the process
+        logging.error("get_embeddings function failed: %s", e, exc_info=True)
         return {}
 
 
@@ -98,13 +118,36 @@ def get_stock_metadata(ticker: str) -> dict:
         return {"sector": None, "industry": None}
 
 
-def get_eps_surprise(api_key: str | None, ticker: str) -> dict:
+def get_eps_surprise(api_key: Optional[str], ticker: str) -> dict:
+    """
+    Returns a dict shaped for BigQuery table
+        eps_surprise  – FLOAT64  (relative surprise, e.g. 0.12 for +12 %)
+        eps_missing   – BOOL
+
+    Assumes table already has these two columns.
+    """
     if not api_key:
+        # no key ⇒ treat as missing
         return {"eps_surprise": None, "eps_missing": True}
+
+    url = (f"https://financialmodelingprep.com/api/v3/"
+           f"earnings-surprises/{ticker}?apikey={api_key}")
     try:
-        url = f"https://financialmodelingprep.com/api/v3/earnings-surprises/{ticker}?apikey={api_key}"
         data = requests.get(url, timeout=10).json()
-        return {"eps_surprise": data[0]["actualEarningResult"], "eps_missing": False} if data else {"eps_surprise": None, "eps_missing": True}
+        if not data:
+            raise ValueError("empty response")
+
+        actual   = data[0]["actualEarningResult"]
+        estimate = data[0]["estimatedEarning"]
+
+        # Absolute surprise
+        surprise = actual - estimate
+
+        # Normalised (% of estimate).  Handle zero-estimate edge case.
+        surprise_pct = surprise / abs(estimate) if estimate else None
+
+        return {"eps_surprise": surprise_pct, "eps_missing": False}
+
     except Exception as e:
         logging.error("get_eps_surprise: %s", e)
         return {"eps_surprise": None, "eps_missing": True}
