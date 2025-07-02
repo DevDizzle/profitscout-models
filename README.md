@@ -127,4 +127,6 @@ Upload a new `.txt` transcript to `gs://<BUCKET>/earnings-call-summaries/` — t
 **ML Training & Prediction (manual or scheduled)**  
 ```bash
 gcloud ai pipelines run --pipeline-file profitscout_pipeline.json \
-    --region us-central1 --project YOUR_PROJECT
+    --region us-central1 \
+    --project YOUR_PROJECT
+```

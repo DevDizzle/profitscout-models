@@ -1,11 +1,12 @@
 import os
 import logging
+import json
 from google.cloud import storage, pubsub_v1, bigquery
 
 # Environment Variables
 PROJECT_ID = os.environ.get('PROJECT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME')
-DESTINATION_TABLE = os.environ.get('DESTINATION_TABLE') #
+DESTINATION_TABLE = os.environ.get('DESTINATION_TABLE')
 PUB_SUB_TOPIC = os.environ.get('PUB_SUB_TOPIC') 
 
 # Clients
@@ -26,7 +27,7 @@ def discover_new_transcripts(event, context):
     # Get a set of already processed tickers and dates for quick lookup
     try:
         query = f"""
-        SELECT DISTINCT FORMAT("%s_%t", ticker, quarter_end_date)
+        SELECT DISTINCT FORMAT('%s_%s', ticker, quarter_end_date)
         FROM `{DESTINATION_TABLE}`
         """
         processed_items = {row[0] for row in bq_client.query(query).result()}
