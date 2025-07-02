@@ -1,4 +1,8 @@
-## ProfitScout ML Pipeline  
+# ProfitScout ML Pipeline
+
+![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
+![XGBoost](https://img.shields.io/badge/XGBoost-1.7+-brightgreen.svg)
+![Vertex AI](https://img.shields.io/badge/Vertex_AI-Pipelines_&_Training-ff69b4.svg)
 
 ### 1. Project Overview  
 The **ProfitScout ML Pipeline** is an end-to-end, *serverless* system on Google Cloud Platform that predicts short-term stock-price moves after quarterly earnings calls. It:  
