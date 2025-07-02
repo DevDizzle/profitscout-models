@@ -258,6 +258,18 @@ def get_max_close_30d(ticker: str, call_date: str) -> dict:
 
 # ─────────────────── orchestrator ─────────────────────────
 def create_features(message: dict) -> dict | None:
+    """
+    Validates message, orchestrates feature creation, and returns a
+    complete row for BigQuery.
+    """
+    # --- 1. Validate Input Message ---
+    # Ensure the core GCS paths required for processing are present.
+    required_keys = ["ticker", "quarter_end_date", "summary_gcs_path", "transcript_gcs_path"]
+    if not all(key in message and message[key] is not None for key in required_keys):
+        logging.error(f"FATAL: Message is missing one or more required keys or values. Message data: {message}")
+        return None # Stop processing immediately
+
+    # --- 2. Orchestrate Feature Generation ---
     ticker = message.get("ticker")
     row = {"ticker": ticker, "quarter_end_date": message.get("quarter_end_date")}
 
@@ -270,6 +282,11 @@ def create_features(message: dict) -> dict | None:
         row.update(get_price_technicals(ticker, row["earnings_call_date"]))
         row.update(get_max_close_30d(ticker, row["earnings_call_date"]))
     else:
-        logging.warning("No earnings_call_date; skipped price features")
+        logging.warning("No earnings_call_date; skipped price features for ticker %s", ticker)
 
-    return row if {"earnings_call_date", "sentiment_score"}.issubset(row) else None
+    # Final check to ensure critical data was generated
+    if not {"earnings_call_date", "sentiment_score"}.issubset(row):
+        logging.error(f"Failed to generate critical features (date/sentiment) for {ticker}. Aborting row.")
+        return None
+
+    return row
