@@ -20,29 +20,37 @@ The **ProfitScout ML Pipeline** is an end-to-end, *serverless* system on Google 
   - EPS-surprise & other fundamental enrichments  
 - **BigQuery Feature Store**: single source of truth for training & scoring.  
 - **Declarative Orchestration**: Vertex AI Pipelines manage the graph.  
-- **Containerized, Reproducible Training** (Docker).  
-- **Automated Model Versioning & Deployment** to Vertex AI Model Registry.  
+- **Containerized, Reproducible Training** (Docker).
+- **Automated Model Versioning & Deployment** to Vertex AI Model Registry.
+- **Reliable Staging Pattern**: a `loader` service streams rows into a staging
+  table while a scheduled `merger` service deduplicates and merges them into the
+  final table.
+- **Dead-letter Queues & Extended Ack Deadline** make Pub/Sub processing more
+  resilient under heavy load.
 
 ### 3. Live Architecture  
 
 ```mermaid
 graph TD
-  subgraph "Data Ingestion & Feature Engineering (Event-Driven)"
+  subgraph "Event-Driven Processing"
     A[GCS: New Earnings Call Transcript] -->|Event Trigger| B(Cloud Function: discovery)
-    B -->|Pub/Sub Message| C(Cloud Run: feature-engineering)
-    C -->|Upserts Features| D[BigQuery: Feature Store]
+    B -->|Pub/Sub| C(Cloud Run: feature-engineering)
+    C -->|Pub/Sub| D(Cloud Run: loader)
+    D -->|Stream| E[BigQuery: Staging Table]
+    F[Cloud Scheduler] -->|Invoke| G(Cloud Function: merger)
+    E -->|Merge| H[BigQuery: Feature Store]
   end
 
   subgraph "ML Lifecycle (Vertex AI Orchestrated)"
-    E(Vertex AI Pipeline) -->|1️⃣ Triggers| F(Custom Training Job)
-    D -->|Input Data| F
-    F -->|Model Artifact| G[GCS Bucket]
-    E -->|2️⃣ Import & Register| H(Vertex AI Model Registry)
-    G --> H
-    E -->|3️⃣ Batch Predict| I(Batch Prediction Job)
-    H -->|Registered Model| I
-    D -->|Prediction Data| I
-    I -->|Writes| J[BigQuery: Prediction Table]
+    I(Vertex AI Pipeline) -->|1️⃣ Triggers| J(Custom Training Job)
+    H -->|Input Data| J
+    J -->|Model Artifact| K[GCS Bucket]
+    I -->|2️⃣ Import & Register| L(Vertex AI Model Registry)
+    K --> L
+    I -->|3️⃣ Batch Predict| M(Batch Prediction Job)
+    L -->|Registered Model| M
+    H -->|Prediction Data| M
+    M -->|Writes| N[BigQuery: Prediction Table]
   end
   ```
   ### 4. Technology Stack  
@@ -67,7 +75,8 @@ graph TD
 - **Pub/Sub Decoupling** guarantees resilience—messages persist until processed.  
 - **BigQuery Feature Store** enables reuse, decouples prep from training, and scales effortlessly.  
 - **Declarative Vertex AI Pipelines** provide a visual, auditable DAG and easy re-runs.  
-- **Containerized Training** eliminates “works-on-my-machine” drift via immutable Docker images.  
+- **Containerized Training** eliminates “works-on-my-machine” drift via immutable Docker images.
+- **Staging Table Pattern** separates streaming inserts from analytical tables, enabling safe deduplication and large-scale loads.
 
 ---
 
@@ -76,7 +85,9 @@ graph TD
 | **Component**        | **Type**               | **Trigger / Orchestrator** | **Purpose**                                                     |
 |----------------------|------------------------|----------------------------|----------------------------------------------------------------|
 | `discovery`          | Cloud Function         | GCS event                  | Detect new transcript; publish Pub/Sub message                 |
-| `feature-engineering`| Cloud Run              | Pub/Sub                    | Build features; upsert into BigQuery                           |
+| `feature-engineering`| Cloud Run              | Pub/Sub                    | Build features; publish to loader                              |
+| `loader`             | Cloud Run              | Pub/Sub                    | Stream feature rows into BigQuery staging table                |
+| `merger`             | Cloud Function         | Cloud Scheduler            | Deduplicate & merge staging table into feature store           |
 | `training-job`       | Vertex AI Custom Job   | Vertex AI Pipeline         | Train XGBoost; save artifact to GCS                            |
 | `model-upload`       | Vertex AI Pipeline Op  | Vertex AI Pipeline         | Import & register model version                                |
 | `batch-prediction`   | Vertex AI Pipeline Op  | Vertex AI Pipeline         | Score feature table; write results to BigQuery                 |
@@ -112,6 +123,19 @@ graph TD
    gcloud run deploy feature-engineering \
      --image us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/feature-engineering:latest \
      --region us-central1
+
+   # Cloud Run: loader
+   gcloud run deploy loader \
+     --image us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/loader:latest \
+     --region us-central1 \
+     --set-env-vars DESTINATION_TABLE=YOUR_DATASET.staging_table
+
+   # Cloud Function: merger (scheduled)
+  gcloud functions deploy merge_staging_to_final --gen2 --runtime python39 \
+    --trigger-topic merge-features \
+    --region us-central1 \
+    --set-env-vars PROJECT_ID=YOUR_PROJECT,STAGING_TABLE=YOUR_DATASET.staging_table,FINAL_TABLE=YOUR_DATASET.feature_store
+   ```
 
 4. **Compile & run the pipeline**  
    ```bash
