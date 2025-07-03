@@ -2,8 +2,9 @@
 import os, json, logging, re, requests, textwrap
 import pandas as pd, pandas_ta as ta
 from typing import Optional
-from google.cloud import storage, aiplatform, language_v1, bigquery, secretmanager
+from google.cloud import storage, aiplatform, bigquery, secretmanager
 from vertexai.language_models import TextEmbeddingModel
+from genai_client import generate 
 from . import bq
 
 # ───────────────────────── init ────────────────────────────
@@ -11,7 +12,6 @@ PROJECT_ID = os.environ.get("PROJECT_ID")
 aiplatform.init(project=PROJECT_ID, location="us-central1")
 
 storage_client  = storage.Client()
-language_client = language_v1.LanguageServiceClient()
 secret_client   = secretmanager.SecretManagerServiceClient()
 embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
 
@@ -46,12 +46,11 @@ def _parse_sections(md: str) -> dict:
         if current and hit is None:
             sections[current] += line + "\n"
     
-    # ADDED LOGGING
     logging.info("Parsed sections from summary markdown:")
     for k, v in sections.items():
         logging.info("  %-25s -> %4d chars", k, len(v.strip()))
         sample = textwrap.shorten(v.strip().replace("\n", " "), width=120) or "(blank)"
-        logging.debug("    Sample: %s", sample) # Use logging.debug for more verbose output
+        logging.debug("    Sample: %s", sample)
     return sections
 
 
@@ -69,8 +68,6 @@ def get_embeddings(summary_gcs_path: str) -> dict:
             txt = txt.strip()
             if txt:
                 logging.info("Generating embedding for section: %s", sec)
-                # Note: Ensure the Gemini model you're using doesn't require the `task_type` parameter.
-                # The "gemini-embedding-001" model does not.
                 emb = embedding_model.get_embeddings([txt])[0]
                 vec = list(emb.values)
                 results[f"{sec}_embedding"] = vec
@@ -89,17 +86,54 @@ def get_embeddings(summary_gcs_path: str) -> dict:
         return {}
 
 
-def get_sentiment_and_date(transcript_gcs_path: str) -> dict:
+# ── Sentiment on summary (Gemini-flash) ────────────────────────────
+def _flash_score(summary_text: str) -> float:
+    prompt = (
+    "You are a sell-side equity analyst.  Evaluate the MANAGEMENT sentiment in the "
+    "earnings-call summary below, taking into account:\n"
+    "  • Narrative language and confident / cautious phrasing\n"
+    "  • Direction and magnitude of the numeric results (revenue, EPS, margins, guidance)\n"
+    "  • Surprises vs. expectations (beats / misses) and any forward-looking statements\n\n"
+    "Convert your judgment into **one floating-point number** between −1.000 and 1.000, "
+    "inclusive, with **exactly three digits after the decimal point**. "
+    "Interpretation: −1.000 = strongly negative, 0.000 = neutral, 1.000 = strongly positive.\n"
+    "Valid formats: -0.732   0.000   0.415\n\n"
+    "⚠️  Output STRICTLY the number only – no words, symbols, or explanations.\n\n"
+    "### Earnings-Call Summary\n"
+    f"{summary_text}"
+)
+    return float(generate(prompt))
+
+def get_sentiment_score(summary_gcs_path: str) -> dict:
+    try:
+        bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
+        text = storage_client.bucket(bucket).blob(blob).download_as_text()
+        if not text:
+            logging.warning("Empty summary at %s", summary_gcs_path)
+            return {"sentiment_score": None}
+
+        return {"sentiment_score": _flash_score(text)}
+
+    except Exception as e:
+        logging.error("get_sentiment_score: %s", e, exc_info=True)
+        return {"sentiment_score": None}
+
+# ── Earnings-call date ─────────────────────────────
+def get_earnings_call_date(transcript_gcs_path: str) -> dict:
+    """
+    Reads the original transcript JSON *only* to pull the 'date' field.
+    """
     try:
         bucket, blob = transcript_gcs_path.removeprefix("gs://").split("/", 1)
-        data = json.loads(storage_client.bucket(bucket).blob(blob).download_as_string())
-        doc = language_v1.Document(content=data.get("content", ""),
-                                   type_=language_v1.Document.Type.PLAIN_TEXT)
-        score = language_client.analyze_sentiment(document=doc).document_sentiment.score
-        return {"sentiment_score": score, "earnings_call_date": data.get("date")}
+        raw = storage_client.bucket(bucket).blob(blob).download_as_string()
+        date_str = json.loads(raw).get("date")
+        if date_str:
+            date_str = date_str.split(" ")[0]
+        return {"earnings_call_date": date_str}
+
     except Exception as e:
-        logging.error("get_sentiment_and_date: %s", e)
-        return {}
+        logging.error("get_earnings_call_date: %s", e, exc_info=True)
+        return {"earnings_call_date": None}
 
 
 def get_stock_metadata(ticker: str) -> dict:
@@ -275,7 +309,8 @@ def create_features(message: dict) -> dict | None:
 
     row.update(get_stock_metadata(ticker))
     row.update(get_embeddings(message.get("summary_gcs_path")))
-    row.update(get_sentiment_and_date(message.get("transcript_gcs_path")))
+    row.update(get_sentiment_score(message["summary_gcs_path"]))
+    row.update(get_earnings_call_date(message["transcript_gcs_path"]))
     row.update(get_eps_surprise(get_fmp_api_key(), ticker))
 
     # --- 3. Clean Date and Generate Date-Dependent Features ---

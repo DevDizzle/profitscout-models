@@ -14,3 +14,5 @@ pandas-ta
 db-dtypes
 requests
 python-dateutil
+tenacity>=8.2.0
+google-genai>=1.22.0
