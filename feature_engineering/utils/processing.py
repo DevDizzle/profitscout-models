@@ -278,13 +278,19 @@ def create_features(message: dict) -> dict | None:
     row.update(get_sentiment_and_date(message.get("transcript_gcs_path")))
     row.update(get_eps_surprise(get_fmp_api_key(), ticker))
 
+    # --- 3. Clean Date and Generate Date-Dependent Features ---
     if row.get("earnings_call_date"):
+        # FIX: Strip the timestamp from the date string to match BigQuery's DATE type.
+        row["earnings_call_date"] = row["earnings_call_date"].split(" ")[0]
+        
+        # Now, continue with the correctly formatted date.
         row.update(get_price_technicals(ticker, row["earnings_call_date"]))
         row.update(get_max_close_30d(ticker, row["earnings_call_date"]))
     else:
         logging.warning("No earnings_call_date; skipped price features for ticker %s", ticker)
 
-    # Final check to ensure critical data was generated
+    # --- 4. Final Validation and Return ---
+    # Final check to ensure critical data was generated before returning.
     if not {"earnings_call_date", "sentiment_score"}.issubset(row):
         logging.error(f"Failed to generate critical features (date/sentiment) for {ticker}. Aborting row.")
         return None

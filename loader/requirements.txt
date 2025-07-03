@@ -1,0 +1,4 @@
+# loader/requirements.txt
+flask
+gunicorn
+google-cloud-bigquery
