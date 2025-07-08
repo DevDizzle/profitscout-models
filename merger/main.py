@@ -1,4 +1,4 @@
-# FILE: merger/main.py
+"""Scheduled function to merge staging data into the final BigQuery table."""
 
 import os
 import logging
@@ -131,5 +131,4 @@ def merge_staging_to_final(event, context):
 
         return "Merge completed successfully", 200
     except Exception as e:
-        logging.error(f"Merge process failed: {e}", exc_info=True)
-        return "Merge process failed", 500
+        logging.error(f"Merge process failed: {e}", exc_info=True)        return "Merge process failed", 500

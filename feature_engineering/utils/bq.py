@@ -15,8 +15,7 @@ def _format_value(value):
     if isinstance(value, list):
         return f"[{','.join(map(str, value))}]"
     
-    # FIX: This now handles both date and datetime strings correctly.
-    # It extracts only the date portion from the string before casting.
+    # Handle both date and datetime strings by casting the date portion.
     if isinstance(value, str) and re.match(r'^\d{4}-\d{2}-\d{2}', value):
         # Take only the date part of the string (e.g., '2025-05-01')
         date_part = value.split(' ')[0]
@@ -64,5 +63,4 @@ def upsert_row(row: dict, table_id: str, primary_keys: list):
         logging.error(f"BigQuery upsert failed: {e}")
         logging.error(f"Failed query: {query}")
         safe_row = {k: (type(v).__name__ if isinstance(v, list) else v) for k, v in row.items()}
-        logging.error(f"Row data (types simplified): {safe_row}")
-        raise
+        logging.error(f"Row data (types simplified): {safe_row}")        raise

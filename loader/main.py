@@ -1,4 +1,4 @@
-# loader/main.py
+"""Cloud Run service to stream processed features into BigQuery."""
 
 import os
 import json
@@ -70,5 +70,4 @@ def load_batch_to_bq():
         return "Internal Server Error", 500
 
 if __name__ == '__main__':
-    PORT = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    PORT = int(os.environ.get('PORT', 8080))    app.run(host='0.0.0.0', port=PORT, debug=True)

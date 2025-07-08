@@ -312,5 +312,4 @@ def create_features(message: dict) -> dict | None:
     if not {"earnings_call_date", "sentiment_score"}.issubset(row):
         logging.error(f"Failed to generate critical features for {ticker}. Aborting row.")
         return None
-
     return row

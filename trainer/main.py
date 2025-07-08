@@ -218,5 +218,4 @@ def main():
     
     logging.info("Training run complete.")
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":    main()
