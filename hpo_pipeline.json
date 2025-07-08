@@ -1,0 +1,299 @@
+{
+  "components": {
+    "comp-hyperparameter-tuning-job": {
+      "executorLabel": "exec-hyperparameter-tuning-job",
+      "inputDefinitions": {
+        "parameters": {
+          "base_output_directory": {
+            "description": "The Cloud Storage location to store the output of this HyperparameterTuningJob. The base_output_directory of each child CustomJob backing a Trial is set to a subdirectory with name as the trial id under its parent HyperparameterTuningJob's `base_output_directory`. The following Vertex AI environment variables will be passed to containers or Python modules when this field is set: * AIP_MODEL_DIR = `\\/\\/model\\/` * AIP_CHECKPOINT_DIR = `\\/\\/checkpoints\\/` * AIP_TENSORBOARD_LOG_DIR = `\\/\\/logs\\/`",
+            "parameterType": "STRING"
+          },
+          "display_name": {
+            "description": "The user-defined name of the HyperparameterTuningJob. The name can be up to 128 characters long and can be consist of any UTF-8 characters.",
+            "parameterType": "STRING"
+          },
+          "encryption_spec_key_name": {
+            "defaultValue": "",
+            "description": "Customer-managed encryption key options for a HyperparameterTuningJob. If this is set, then all resources created by the HyperparameterTuningJob will be encrypted with the provided encryption key. Has the form: `projects/my-project/locations/my-location/keyRings/my-kr/cryptoKeys/my-key`. The key needs to be in the same region as where the compute resource is created.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "location": {
+            "defaultValue": "us-central1",
+            "description": "Location to run the HyperparameterTuningJob in, defaults to `'us-central1'`.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "max_failed_trial_count": {
+            "defaultValue": 0.0,
+            "description": "The number of failed Trials that need to be seen before failing the HyperparameterTuningJob. If set to 0, Vertex AI decides how many Trials must fail before the whole job fails.",
+            "isOptional": true,
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "max_trial_count": {
+            "description": "The desired total number of Trials.",
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "network": {
+            "defaultValue": "",
+            "description": "The full name of the Compute Engine network to which the job should be peered. For example, `projects/12345/global/networks/myVPC`. Private services access must already be configured for the network. If left unspecified, the job is not peered with any network.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "parallel_trial_count": {
+            "description": "The desired number of Trials to run in parallel.",
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "project": {
+            "defaultValue": "{{$.pipeline_google_cloud_project_id}}",
+            "description": "Project to run the HyperparameterTuningJob in. Defaults to the project in which the PipelineJob is run.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "service_account": {
+            "defaultValue": "",
+            "description": "Specifies the service account for workload run-as account. Users submitting jobs must have act-as permission on this run-as account.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "study_spec_algorithm": {
+            "defaultValue": "ALGORITHM_UNSPECIFIED",
+            "description": "The search algorithm specified for the Study. Accepts one of the following:\n* `'ALGORITHM_UNSPECIFIED'` - If you do not specify an algorithm, your job uses the default Vertex AI algorithm. The default algorithm applies Bayesian optimization to arrive at the optimal solution with a more effective search over the parameter space.\n* `'GRID_SEARCH'` - A simple grid search within the feasible space. This option is particularly useful if you want to specify a quantity of trials that is greater than the number of points in the feasible space. In such cases, if you do not specify a grid search, the Vertex AI default algorithm may generate duplicate suggestions. To use grid search, all parameter specs must be of type `IntegerParameterSpec`, `CategoricalParameterSpace`, or `DiscreteParameterSpec`.\n* `'RANDOM_SEARCH'` - A simple random search within the feasible space.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "study_spec_measurement_selection_type": {
+            "defaultValue": "BEST_MEASUREMENT",
+            "description": "This indicates which measurement to use if/when the service automatically selects the final measurement from previously reported intermediate measurements. Accepts: `'BEST_MEASUREMENT'` or `'LAST_MEASUREMENT'`. Choose this based on two considerations: A) Do you expect your measurements to monotonically improve? If so, choose `'LAST_MEASUREMENT'`. On the other hand, if you're in a situation where your system can \"over-train\" and you expect the performance to get better for a while but then start declining, choose `'BEST_MEASUREMENT'`. B) Are your measurements significantly noisy and/or irreproducible? If so, `'BEST_MEASUREMENT'` will tend to be over-optimistic, and it may be better to choose `'LAST_MEASUREMENT'`. If both or neither of (A) and (B) apply, it doesn't matter which selection type is chosen.",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "study_spec_metrics": {
+            "description": "List serialized from dictionary representing the metrics to optimize. The dictionary key is the metric_id, which is reported by your training job, and the dictionary value is the optimization goal of the metric (`'minimize'` or `'maximize'`). Example:\nmetrics = hyperparameter_tuning_job.serialize_metrics({ 'loss': 'minimize', 'accuracy': 'maximize' })",
+            "parameterType": "LIST"
+          },
+          "study_spec_parameters": {
+            "description": "List serialized from the parameter dictionary. The dictionary represents parameters to optimize. The dictionary key is the parameter_id, which is passed into your training job as a command line key word argument, and the dictionary value is the parameter specification of the metric. Example:\nfrom google.cloud.aiplatform import hyperparameter_tuning as hpt\nfrom google_cloud_pipeline_components.v1 import hyperparameter_tuning_job\nparameters = hyperparameter_tuning_job.serialize_parameters({ 'lr': hpt.DoubleParameterSpec(min=0.001, max=0.1, scale='log'), 'units': hpt.IntegerParameterSpec(min=4, max=128, scale='linear'), 'activation': hpt.CategoricalParameterSpec(values=['relu', 'selu']), 'batch_size': hpt.DiscreteParameterSpec(values=[128, 256], scale='linear') })",
+            "parameterType": "LIST"
+          },
+          "worker_pool_specs": {
+            "description": "The spec of the worker pools including machine type and Docker image. All worker pools except the first one are optional and can be skipped by providing an empty value.",
+            "parameterType": "LIST"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "gcp_resources": {
+            "description": "Serialized JSON of `gcp_resources` [proto](https://github.com/kubeflow/pipelines/tree/master/components/google-cloud/google_cloud_pipeline_components/proto) which contains the GCP resource ID of the Hyperparameter Tuning job.",
+            "parameterType": "STRING"
+          }
+        }
+      }
+    }
+  },
+  "defaultPipelineRoot": "gs://profitscout-lx6bb-pipeline-artifacts/hpo",
+  "deploymentSpec": {
+    "executors": {
+      "exec-hyperparameter-tuning-job": {
+        "container": {
+          "args": [
+            "--type",
+            "HyperparameterTuningJob",
+            "--payload",
+            "{\"Concat\": [\"{\", \"\\\"display_name\\\": \\\"\", \"{{$.inputs.parameters['display_name']}}\", \"\\\"\", \", \\\"study_spec\\\": {\", \"\\\"metrics\\\": \", \"{{$.inputs.parameters['study_spec_metrics']}}\", \", \\\"parameters\\\": \", \"{{$.inputs.parameters['study_spec_parameters']}}\", \", \\\"algorithm\\\": \\\"\", \"{{$.inputs.parameters['study_spec_algorithm']}}\", \"\\\"\", \", \\\"measurement_selection_type\\\": \\\"\", \"{{$.inputs.parameters['study_spec_measurement_selection_type']}}\", \"\\\"\", \"}\", \", \\\"max_trial_count\\\": \", \"{{$.inputs.parameters['max_trial_count']}}\", \", \\\"parallel_trial_count\\\": \", \"{{$.inputs.parameters['parallel_trial_count']}}\", \", \\\"max_failed_trial_count\\\": \", \"{{$.inputs.parameters['max_failed_trial_count']}}\", \", \\\"trial_job_spec\\\": {\", \"\\\"worker_pool_specs\\\": \", \"{{$.inputs.parameters['worker_pool_specs']}}\", \", \\\"service_account\\\": \\\"\", \"{{$.inputs.parameters['service_account']}}\", \"\\\"\", \", \\\"network\\\": \\\"\", \"{{$.inputs.parameters['network']}}\", \"\\\"\", \", \\\"base_output_directory\\\": {\", \"\\\"output_uri_prefix\\\": \\\"\", \"{{$.inputs.parameters['base_output_directory']}}\", \"\\\"}\", \"}\", \", \\\"encryption_spec\\\": {\\\"kms_key_name\\\":\\\"\", \"{{$.inputs.parameters['encryption_spec_key_name']}}\", \"\\\"}\", \"}\"]}",
+            "--project",
+            "{{$.inputs.parameters['project']}}",
+            "--location",
+            "{{$.inputs.parameters['location']}}",
+            "--gcp_resources",
+            "{{$.outputs.parameters['gcp_resources'].output_file}}"
+          ],
+          "command": [
+            "python3",
+            "-u",
+            "-m",
+            "google_cloud_pipeline_components.container.v1.hyperparameter_tuning_job.launcher"
+          ],
+          "image": "gcr.io/ml-pipeline/google-cloud-pipeline-components:2.20.1"
+        }
+      }
+    }
+  },
+  "pipelineInfo": {
+    "description": "Finds the best hyperparameters for ProfitScout.",
+    "name": "profitscout-hpo-pipeline"
+  },
+  "root": {
+    "dag": {
+      "tasks": {
+        "hyperparameter-tuning-job": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-hyperparameter-tuning-job"
+          },
+          "inputs": {
+            "parameters": {
+              "base_output_directory": {
+                "runtimeValue": {
+                  "constant": "gs://profitscout-lx6bb-pipeline-artifacts/hpo"
+                }
+              },
+              "display_name": {
+                "runtimeValue": {
+                  "constant": "profitscout-hpo-job"
+                }
+              },
+              "location": {
+                "componentInputParameter": "location"
+              },
+              "max_trial_count": {
+                "componentInputParameter": "max_trial_count"
+              },
+              "parallel_trial_count": {
+                "componentInputParameter": "parallel_trial_count"
+              },
+              "pipelinechannel--project": {
+                "componentInputParameter": "project"
+              },
+              "pipelinechannel--source_table": {
+                "componentInputParameter": "source_table"
+              },
+              "project": {
+                "componentInputParameter": "project"
+              },
+              "study_spec_metrics": {
+                "runtimeValue": {
+                  "constant": [
+                    {
+                      "goal": 1.0,
+                      "metric_id": "pr_auc"
+                    }
+                  ]
+                }
+              },
+              "study_spec_parameters": {
+                "runtimeValue": {
+                  "constant": [
+                    {
+                      "conditional_parameter_specs": [],
+                      "integer_value_spec": {
+                        "max_value": "128",
+                        "min_value": "32"
+                      },
+                      "parameter_id": "pca_n",
+                      "scale_type": 1.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "integer_value_spec": {
+                        "max_value": "10",
+                        "min_value": "4"
+                      },
+                      "parameter_id": "xgb_max_depth",
+                      "scale_type": 1.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "integer_value_spec": {
+                        "max_value": "10",
+                        "min_value": "1"
+                      },
+                      "parameter_id": "xgb_min_child_weight",
+                      "scale_type": 1.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "double_value_spec": {
+                        "max_value": 1.0,
+                        "min_value": 0.7
+                      },
+                      "parameter_id": "xgb_subsample",
+                      "scale_type": 1.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "double_value_spec": {
+                        "max_value": 1.0,
+                        "min_value": 0.01
+                      },
+                      "parameter_id": "logreg_c",
+                      "scale_type": 2.0
+                    }
+                  ]
+                }
+              },
+              "worker_pool_specs": {
+                "runtimeValue": {
+                  "constant": [
+                    {
+                      "container_spec": {
+                        "args": [
+                          "--project-id",
+                          "{{$.inputs.parameters['pipelinechannel--project']}}",
+                          "--source-table",
+                          "{{$.inputs.parameters['pipelinechannel--source_table']}}",
+                          "--pca-n",
+                          "{{$.trial.parameters['pca_n']}}",
+                          "--xgb-max-depth",
+                          "{{$.trial.parameters['xgb_max_depth']}}",
+                          "--xgb-min-child-weight",
+                          "{{$.trial.parameters['xgb_min_child_weight']}}",
+                          "--xgb-subsample",
+                          "{{$.trial.parameters['xgb_subsample']}}",
+                          "--logreg-c",
+                          "{{$.trial.parameters['logreg_c']}}"
+                        ],
+                        "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
+                      },
+                      "machine_spec": {
+                        "machine_type": "n1-standard-8"
+                      },
+                      "replica_count": 1.0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "hyperparameter-tuning-job"
+          }
+        }
+      }
+    },
+    "inputDefinitions": {
+      "parameters": {
+        "location": {
+          "defaultValue": "us-central1",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "max_trial_count": {
+          "defaultValue": 20.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "parallel_trial_count": {
+          "defaultValue": 5.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "project": {
+          "defaultValue": "profitscout-lx6bb",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "source_table": {
+          "defaultValue": "profit_scout.breakout_features",
+          "isOptional": true,
+          "parameterType": "STRING"
+        }
+      }
+    }
+  },
+  "schemaVersion": "2.1.0",
+  "sdkVersion": "kfp-2.13.0"
+}

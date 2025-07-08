@@ -6,4 +6,4 @@ scikit-learn
 xgboost
 joblib
 gcsfs
-google-cloud-aiplatform-hyperparameter-tuning
+cloudml-hypertune

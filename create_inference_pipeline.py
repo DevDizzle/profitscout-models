@@ -48,6 +48,7 @@ def daily_inference_pipeline(
         },
     )
 
+<<<<<<< HEAD
     # 2️⃣ importer node converts the registry model to a VertexModel artifact
     model_artifact = dsl.importer(
         artifact_uri = (
@@ -79,3 +80,32 @@ if __name__ == "__main__":
         package_path  = "daily_inference_pipeline.json",
     )
     print("✓ Compiled daily_inference_pipeline.json")
+=======
+    # 2️⃣  Run your custom-container job for inference
+    CustomTrainingJobOp(
+        display_name = "profitscout-prediction-job",
+        project      = project,
+        location     = location,
+        worker_pool_specs=[{
+            "machine_spec": {"machine_type": "n1-standard-4"},
+            "replica_count": 1,
+            "container_spec": {
+                "image_uri": PREDICTOR_IMAGE,
+                "args": [
+                    f"--project-id={project}",
+                    f"--source-table={PREDICTION_INPUT_TBL}",
+                    f"--destination-table={PREDICTION_OUTPUT_TBL}",
+                    f"--model-dir={MODEL_ARTIFACT_DIR}",
+                ],
+            },
+        }],
+    ).after(stage_batch)
+
+# ───────── compile ─────────
+if __name__ == "__main__":
+    compiler.Compiler().compile(
+        pipeline_func = inference_pipeline,
+        package_path  = "inference_pipeline.json",
+    )
+    print("✓ Compiled inference_pipeline.json")
+>>>>>>> f338ebf (Local edits before rebase)
