@@ -1,4 +1,3 @@
-# FILE: create_hpo_pipeline.py
 """
 Creates a Vertex AI Pipeline to run a Hyperparameter Tuning job.
 """
@@ -80,5 +79,4 @@ if __name__ == "__main__":
     compiler.Compiler().compile(
         pipeline_func=hpo_pipeline,
         package_path="hpo_pipeline.json",
-    )
-    print("✓ Compiled hpo_pipeline.json")
+    )    print("✓ Compiled hpo_pipeline.json")

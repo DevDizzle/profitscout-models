@@ -1,3 +1,5 @@
+"""Cloud Function to publish Pub/Sub messages for new transcripts."""
+
 import os
 import logging
 import json
@@ -55,5 +57,4 @@ def discover_new_summary(event, context):
         logging.error(f"Could not parse ticker and date from filename: '{file_name}'. Error: {e}")
     except Exception as e:
         logging.error(f"An unexpected error occurred processing file {file_name}: {e}")
-
     return 'OK', 200

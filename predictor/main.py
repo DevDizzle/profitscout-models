@@ -195,5 +195,4 @@ def main():
     save_predictions(df_results, args.project_id, args.destination_table)
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":    main()

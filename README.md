@@ -27,6 +27,8 @@ The **ProfitScout ML Pipeline** is an end-to-end, *serverless* system on Google 
   final table.
 - **Dead-letter Queues & Extended Ack Deadline** make Pub/Sub processing more
   resilient under heavy load.
+- **Custom Predictor Service** simplifies batch predictions using the latest
+  model artifacts.
 
 ### 3. Live Architecture  
 
@@ -91,6 +93,7 @@ graph TD
 | `training-job`       | Vertex AI Custom Job   | Vertex AI Pipeline         | Train XGBoost; save artifact to GCS                            |
 | `model-upload`       | Vertex AI Pipeline Op  | Vertex AI Pipeline         | Import & register model version                                |
 | `batch-prediction`   | Vertex AI Pipeline Op  | Vertex AI Pipeline         | Score feature table; write results to BigQuery                 |
+| `predictor`          | Cloud Run              | Vertex AI Pipeline         | Serve custom batch predictions using the latest model artifacts |
 
 ---
 
@@ -105,11 +108,17 @@ graph TD
    git clone <YOUR_REPO_URL>
    cd profitscout-ml-pipeline
 
-2. **Build & push the trainer image**  
+2. **Build & push all container images**
    ```bash
-   cd trainer
-   gcloud builds submit \
-     --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/trainer:latest .
+   gcloud builds submit trainer \
+     --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/trainer:latest
+   gcloud builds submit predictor \
+     --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/predictor:latest
+   gcloud builds submit feature_engineering \
+     --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/feature-engineering:latest
+   gcloud builds submit loader \
+     --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/loader:latest
+   ```
 
 3. **Deploy ingestion services**  
    ```bash
@@ -130,6 +139,11 @@ graph TD
      --region us-central1 \
      --set-env-vars DESTINATION_TABLE=YOUR_DATASET.staging_table
 
+  # Cloud Run: predictor
+  gcloud run deploy predictor \
+    --image us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/predictor:latest \
+    --region us-central1
+
    # Cloud Function: merger (scheduled)
   gcloud functions deploy merge_staging_to_final --gen2 --runtime python39 \
     --trigger-topic merge-features \
@@ -137,11 +151,19 @@ graph TD
     --set-env-vars PROJECT_ID=YOUR_PROJECT,STAGING_TABLE=YOUR_DATASET.staging_table,FINAL_TABLE=YOUR_DATASET.feature_store
    ```
 
-4. **Compile & run the pipeline**  
+4. **Compile the pipelines**
    ```bash
-   python pipeline.py   # generates profitscout_pipeline.json
+   python create_training_pipeline.py
+   python create_inference_pipeline.py
+   python create_hpo_pipline.py
+   ```
 
-Open **Vertex AI → Pipelines** in the Google Cloud Console, upload `profitscout_pipeline.json`, and start a run.
+5. **Run a pipeline**
+   ```bash
+   gcloud ai pipelines run --pipeline-file training_pipeline.json \
+       --region us-central1 \
+       --project YOUR_PROJECT
+   ```
 
 ### 8. How to Run the Pipeline  
 
@@ -150,7 +172,8 @@ Upload a new `.txt` transcript to `gs://<BUCKET>/earnings-call-summaries/` — t
 
 **ML Training & Prediction (manual or scheduled)**  
 ```bash
-gcloud ai pipelines run --pipeline-file profitscout_pipeline.json \
+gcloud ai pipelines run --pipeline-file training_pipeline.json \
     --region us-central1 \
     --project YOUR_PROJECT
+# swap the pipeline file for inference_pipeline.json or hpo_pipeline.json as needed
 ```
