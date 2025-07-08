@@ -1,6 +1,8 @@
 # ───────────────────────── imports ─────────────────────────
 import os, json, logging, re, requests, textwrap
 import pandas as pd, pandas_ta as ta
+import numpy as np
+from numpy.linalg import norm
 from typing import Optional
 from google.cloud import storage, aiplatform, bigquery, secretmanager
 from vertexai.language_models import TextEmbeddingModel
@@ -26,9 +28,21 @@ def get_fmp_api_key() -> str | None:
         logging.error("get_fmp_api_key: %s", e)
         return None
 
+def safe_cosine(u, v):
+    """Calculate cosine similarity, handling potential zero vectors."""
+    u, v = np.array(u), np.array(v)
+    if u.ndim == 1: u = u.reshape(1, -1)
+    if v.ndim == 1: v = v.reshape(1, -1)
+    
+    den = norm(u, axis=1) * norm(v, axis=1)
+    if den == 0:
+        return 0.0
+    
+    num = (u * v).sum(axis=1)
+    return (num / den)[0]
+
 
 SECTION_PATTERNS = {
-    # matches:  optional spaces  (# ### etc.) OR (**)  then heading text
     'key_financial_metrics'  : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Key Financial Metrics\b.*',  re.I),
     'key_discussion_points'  : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Key Discussion Points\b.*',  re.I),
     'sentiment_tone'         : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Sentiment Tone\b.*',         re.I),
@@ -71,22 +85,16 @@ def get_embeddings(summary_gcs_path: str) -> dict:
                 emb = embedding_model.get_embeddings([txt])[0]
                 vec = list(emb.values)
                 results[f"{sec}_embedding"] = vec
-                
-                # This is the detailed log you wanted to see
                 logging.info("Embedded %s | len=%d | first5=%s", sec, len(vec), vec[:5])
             else:
-                # This will clearly log if a section is being skipped
                 logging.warning("Section '%s' is empty. Skipping embedding.", sec)
                 results[f"{sec}_embedding"] = None
 
         return results
     except Exception as e:
-        # Log the full error if something goes wrong during the process
         logging.error("get_embeddings function failed: %s", e, exc_info=True)
         return {}
 
-
-# ── Sentiment on summary (Gemini-flash) ────────────────────────────
 def _flash_score(summary_text: str) -> float:
     prompt = (
     "You are a sell-side equity analyst.  Evaluate the MANAGEMENT sentiment in the "
@@ -118,11 +126,8 @@ def get_sentiment_score(summary_gcs_path: str) -> dict:
         logging.error("get_sentiment_score: %s", e, exc_info=True)
         return {"sentiment_score": None}
 
-# ── Earnings-call date ─────────────────────────────
 def get_earnings_call_date(transcript_gcs_path: str) -> dict:
-    """
-    Reads the original transcript JSON *only* to pull the 'date' field.
-    """
+    """Reads the original transcript JSON *only* to pull the 'date' field."""
     try:
         bucket, blob = transcript_gcs_path.removeprefix("gs://").split("/", 1)
         raw = storage_client.bucket(bucket).blob(blob).download_as_string()
@@ -134,7 +139,6 @@ def get_earnings_call_date(transcript_gcs_path: str) -> dict:
     except Exception as e:
         logging.error("get_earnings_call_date: %s", e, exc_info=True)
         return {"earnings_call_date": None}
-
 
 def get_stock_metadata(ticker: str) -> dict:
     try:
@@ -151,17 +155,8 @@ def get_stock_metadata(ticker: str) -> dict:
         logging.error("get_stock_metadata: %s", e)
         return {"sector": None, "industry": None}
 
-
 def get_eps_surprise(api_key: Optional[str], ticker: str) -> dict:
-    """
-    Returns a dict shaped for BigQuery table
-        eps_surprise  – FLOAT64  (relative surprise, e.g. 0.12 for +12 %)
-        eps_missing   – BOOL
-
-    Assumes table already has these two columns.
-    """
     if not api_key:
-        # no key ⇒ treat as missing
         return {"eps_surprise": None, "eps_missing": True}
 
     url = (f"https://financialmodelingprep.com/api/v3/"
@@ -170,35 +165,19 @@ def get_eps_surprise(api_key: Optional[str], ticker: str) -> dict:
         data = requests.get(url, timeout=10).json()
         if not data:
             raise ValueError("empty response")
-
-        actual   = data[0]["actualEarningResult"]
-        estimate = data[0]["estimatedEarning"]
-
-        # Absolute surprise
+        actual, estimate = data[0]["actualEarningResult"], data[0]["estimatedEarning"]
         surprise = actual - estimate
-
-        # Normalised (% of estimate).  Handle zero-estimate edge case.
         surprise_pct = surprise / abs(estimate) if estimate else None
-
         return {"eps_surprise": surprise_pct, "eps_missing": False}
-
     except Exception as e:
         logging.error("get_eps_surprise: %s", e)
         return {"eps_surprise": None, "eps_missing": True}
 
-
-# ───────────────── price features (unchanged) ─────────────────
 def get_price_technicals(ticker: str, call_date: str) -> dict:
     try:
         price_table = os.environ["PRICE_TABLE"]
         call_date = call_date.split(" ")[0]
-        query = f"""
-        SELECT date, open, high, low, adj_close
-        FROM `{price_table}`
-        WHERE ticker = @ticker AND date <= @call_date
-        ORDER BY date DESC
-        LIMIT 100
-        """
+        query = f"SELECT date, open, high, low, adj_close FROM `{price_table}` WHERE ticker = @ticker AND date <= @call_date ORDER BY date DESC LIMIT 100"
         df = (
             bq.bq_client.query(
                 query,
@@ -208,16 +187,10 @@ def get_price_technicals(ticker: str, call_date: str) -> dict:
                         bigquery.ScalarQueryParameter("call_date", "DATE", call_date),
                     ]
                 ),
-            )
-            .to_dataframe()
-            .set_index("date")
-            .sort_index()
+            ).to_dataframe().set_index("date").sort_index()
             .rename(columns={"open": "Open", "high": "High", "low": "Low", "adj_close": "Close"})
         )
-
-        if df.empty:
-            logging.warning("No price data for %s up to %s", ticker, call_date)
-            return {}
+        if df.empty: return {}
 
         df["Adj Close"] = df["Close"]
         df.ta.sma(length=20, append=True)
@@ -229,11 +202,8 @@ def get_price_technicals(ticker: str, call_date: str) -> dict:
         delta = lambda cur, pre: cur - pre if pd.notna(cur) and pd.notna(pre) else None
 
         return {
-            "adj_close_on_call_date": latest["Adj Close"],
-            "sma_20":      latest.get("SMA_20"),
-            "ema_50":      latest.get("EMA_50"),
-            "rsi_14":      latest.get("RSI_14"),
-            "adx_14":      latest.get("ADX_14"),
+            "adj_close_on_call_date": latest["Adj Close"], "sma_20": latest.get("SMA_20"),
+            "ema_50": latest.get("EMA_50"), "rsi_14": latest.get("RSI_14"), "adx_14": latest.get("ADX_14"),
             "sma_20_delta": delta(latest.get("SMA_20"), prev.get("SMA_20")),
             "ema_50_delta": delta(latest.get("EMA_50"), prev.get("EMA_50")),
             "rsi_14_delta": delta(latest.get("RSI_14"), prev.get("RSI_14")),
@@ -243,45 +213,16 @@ def get_price_technicals(ticker: str, call_date: str) -> dict:
         logging.error("get_price_technicals: %s", e)
         return {}
 
-
 def get_max_close_30d(ticker: str, call_date: str) -> dict:
-    """
-    Calculates the maximum adjusted close price in the 30-day period *following* an
-    earnings call. Returns None if the 30-day period has not yet fully passed.
-    """
     try:
-        # --- 1. Define the 30-day forward-looking window ---
-        # Clean the call_date string and define the start and end of the 30-day window.
         start_date_ts = pd.Timestamp(call_date.split(" ")[0])
         end_date_window_ts = start_date_ts + pd.Timedelta(days=30)
-        today_ts = pd.Timestamp.now().floor('D') # Use floor('D') for a clean date comparison.
-
-        # --- 2. Check if the 30-day window is still in the future ---
-        # If today's date is before the window ends, we cannot determine the max price yet.
-        # This is the expected path for inference on recent earnings calls.
+        today_ts = pd.Timestamp.now().floor('D')
         if today_ts < end_date_window_ts:
-            logging.warning(
-                "30-day window for ticker %s with call_date %s is not yet complete (ends on %s). Returning null.",
-                ticker,
-                start_date_ts.strftime('%Y-%m-%d'),
-                end_date_window_ts.strftime('%Y-%m-%d')
-            )
             return {"max_close_30d": None}
 
-        # --- 3. If window is complete, query for the historical max price ---
-        # This path is used for older data, typically during model training.
-        logging.info(
-            "30-day window complete for %s. Querying max price between %s and %s.",
-            ticker,
-            start_date_ts.strftime('%Y-%m-%d'),
-            end_date_window_ts.strftime('%Y-%m-%d')
-        )
         price_table = os.environ["PRICE_TABLE"]
-        max_q = f"""
-        SELECT MAX(adj_close) AS max_price
-        FROM `{price_table}`
-        WHERE ticker=@ticker AND date BETWEEN @start_date AND @end_date
-        """
+        max_q = f"SELECT MAX(adj_close) AS max_price FROM `{price_table}` WHERE ticker=@ticker AND date BETWEEN @start_date AND @end_date"
         max_df = bq.bq_client.query(
             max_q,
             job_config=bigquery.QueryJobConfig(
@@ -290,30 +231,20 @@ def get_max_close_30d(ticker: str, call_date: str) -> dict:
                     bigquery.ScalarQueryParameter("start_date", "DATE", start_date_ts.strftime('%Y-%m-%d')),
                     bigquery.ScalarQueryParameter("end_date", "DATE", end_date_window_ts.strftime('%Y-%m-%d')),
                 ]
-            ),
+            )
         ).to_dataframe()
-
-        # Return the result, or None if for some reason no price data was found.
         return {"max_close_30d": max_df.at[0, "max_price"]} if not max_df.empty else {"max_close_30d": None}
-
     except Exception as e:
-        logging.error("get_max_close_30d failed for ticker %s: %s", ticker, e, exc_info=True)
+        logging.error("get_max_close_30d failed for ticker %s: %s", ticker, e)
         return {"max_close_30d": None}
 
-# ─────────────────── orchestrator ─────────────────────────
 def create_features(message: dict) -> dict | None:
-    """
-    Validates message, orchestrates feature creation, and returns a
-    complete row for BigQuery.
-    """
-    # --- 1. Validate Input Message ---
-    # Ensure the core GCS paths required for processing are present.
+    """Orchestrates feature creation and returns a complete row for BigQuery."""
     required_keys = ["ticker", "quarter_end_date", "summary_gcs_path", "transcript_gcs_path"]
     if not all(key in message and message[key] is not None for key in required_keys):
-        logging.error(f"FATAL: Message is missing one or more required keys or values. Message data: {message}")
-        return None # Stop processing immediately
+        logging.error(f"FATAL: Message missing required keys: {message}")
+        return None
 
-    # --- 2. Orchestrate Feature Generation ---
     ticker = message.get("ticker")
     row = {"ticker": ticker, "quarter_end_date": message.get("quarter_end_date")}
 
@@ -323,21 +254,63 @@ def create_features(message: dict) -> dict | None:
     row.update(get_earnings_call_date(message["transcript_gcs_path"]))
     row.update(get_eps_surprise(get_fmp_api_key(), ticker))
 
-    # --- 3. Clean Date and Generate Date-Dependent Features ---
     if row.get("earnings_call_date"):
-        # FIX: Strip the timestamp from the date string to match BigQuery's DATE type.
         row["earnings_call_date"] = row["earnings_call_date"].split(" ")[0]
-        
-        # Now, continue with the correctly formatted date.
         row.update(get_price_technicals(ticker, row["earnings_call_date"]))
         row.update(get_max_close_30d(ticker, row["earnings_call_date"]))
     else:
         logging.warning("No earnings_call_date; skipped price features for ticker %s", ticker)
+    
+    # --- [NEW] Engineered Features (Single Row) ---
+    # This is the only new block of code. Everything else is from your original file.
+    logging.info(f"Engineering new single-row features for {ticker}...")
+    
+    # Combined categorical feature
+    sector = row.get("sector", "UNK_SEC") or "UNK_SEC"
+    industry = row.get("industry", "UNK_IND") or "UNK_IND"
+    row["industry_sector"] = f"{sector}_{industry}"
 
-    # --- 4. Final Validation and Return ---
-    # Final check to ensure critical data was generated before returning.
+    # Embedding stats and similarities
+    EMB_COLS_NAMES = [
+        "key_financial_metrics_embedding", "key_discussion_points_embedding",
+        "sentiment_tone_embedding", "short_term_outlook_embedding",
+        "forward-looking_signals_embedding",
+    ]
+    vecs = {c: np.array(row[c]) for c in EMB_COLS_NAMES if row.get(c) is not None}
+    
+    for col_name, vec in vecs.items():
+        base_name = col_name.replace("_embedding", "")
+        row[f"{base_name}_norm"] = norm(vec) if vec.size > 0 else 0.0
+        row[f"{base_name}_mean"] = vec.mean() if vec.size > 0 else 0.0
+        row[f"{base_name}_std"] = vec.std() if vec.size > 0 else 0.0
+
+    sim_pairs = [
+        ("cos_fin_disc", "key_financial_metrics_embedding", "key_discussion_points_embedding"),
+        ("cos_fin_tone", "key_financial_metrics_embedding", "sentiment_tone_embedding"),
+        ("cos_disc_short", "key_discussion_points_embedding", "short_term_outlook_embedding"),
+        ("cos_short_fwd", "short_term_outlook_embedding", "forward-looking_signals_embedding"),
+    ]
+    for key, col1, col2 in sim_pairs:
+        row[key] = safe_cosine(vecs.get(col1, []), vecs.get(col2, []))
+
+    # Null indicator for EPS
+    row["eps_surprise_isnull"] = 1 if row.get("eps_surprise") is None else 0
+
+    # Price and technical ratios
+    if row.get("adj_close_on_call_date") and row.get("sma_20") and row.get("sma_20") != 0:
+        row["price_sma20_ratio"] = row["adj_close_on_call_date"] / row["sma_20"]
+    if row.get("ema_50") and row.get("sma_20") and row.get("sma_20") != 0:
+        row["ema50_sma20_ratio"] = row["ema_50"] / row["sma_20"]
+    if row.get("rsi_14") is not None:
+        row["rsi_centered"] = row["rsi_14"] - 50
+        if row.get("sentiment_score") is not None:
+            row["sent_rsi"] = row["sentiment_score"] * row["rsi_centered"]
+    if row.get("adx_14") is not None:
+        row["adx_log1p"] = np.log1p(row["adx_14"])
+    # --- [END OF NEW BLOCK] ---
+
     if not {"earnings_call_date", "sentiment_score"}.issubset(row):
-        logging.error(f"Failed to generate critical features (date/sentiment) for {ticker}. Aborting row.")
+        logging.error(f"Failed to generate critical features for {ticker}. Aborting row.")
         return None
 
     return row

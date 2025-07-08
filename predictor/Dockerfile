@@ -9,8 +9,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the trainer script into the container
+# Copy the predictor script into the container
 COPY main.py .
 
-# Set the entrypoint to execute the trainer script
+# Set the entrypoint to execute the predictor script
 ENTRYPOINT ["python3", "main.py"]

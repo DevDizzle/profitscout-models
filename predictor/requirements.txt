@@ -1,0 +1,7 @@
+google-cloud-bigquery
+google-cloud-storage
+pandas
+scikit-learn
+xgboost
+joblib
+gcsfs

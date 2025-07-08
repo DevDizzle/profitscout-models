@@ -1,6 +1,9 @@
+google-cloud-aiplatform[prediction]>=1.38.1
 google-cloud-bigquery
 google-cloud-storage
 pandas
 scikit-learn
 xgboost
 joblib
+gcsfs
+google-cloud-aiplatform-hyperparameter-tuning
