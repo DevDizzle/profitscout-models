@@ -245,30 +245,38 @@ def get_price_technicals(ticker: str, call_date: str) -> dict:
 
 
 def get_max_close_30d(ticker: str, call_date: str) -> dict:
+    """
+    Calculates the maximum adjusted close price in the 30-day period *following* an
+    earnings call. Returns None if the 30-day period has not yet fully passed.
+    """
     try:
-        price_table = os.environ["PRICE_TABLE"]
-        call_date = call_date.split(" ")[0]
-        end_q = f"""
-        SELECT MAX(date) AS effective_date
-        FROM `{price_table}` WHERE ticker = @ticker AND date <= @call_date
-        """
-        end_df = bq.bq_client.query(
-            end_q,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("ticker", "STRING", ticker),
-                    bigquery.ScalarQueryParameter("call_date", "DATE", call_date),
-                ]
-            ),
-        ).to_dataframe()
+        # --- 1. Define the 30-day forward-looking window ---
+        # Clean the call_date string and define the start and end of the 30-day window.
+        start_date_ts = pd.Timestamp(call_date.split(" ")[0])
+        end_date_window_ts = start_date_ts + pd.Timedelta(days=30)
+        today_ts = pd.Timestamp.now().floor('D') # Use floor('D') for a clean date comparison.
 
-        if end_df.empty or pd.isna(end_df.at[0, "effective_date"]):
-            logging.warning("No trading day ≤ %s for %s", call_date, ticker)
+        # --- 2. Check if the 30-day window is still in the future ---
+        # If today's date is before the window ends, we cannot determine the max price yet.
+        # This is the expected path for inference on recent earnings calls.
+        if today_ts < end_date_window_ts:
+            logging.warning(
+                "30-day window for ticker %s with call_date %s is not yet complete (ends on %s). Returning null.",
+                ticker,
+                start_date_ts.strftime('%Y-%m-%d'),
+                end_date_window_ts.strftime('%Y-%m-%d')
+            )
             return {"max_close_30d": None}
 
-        end_date = end_df.at[0, "effective_date"]
-        start_date = (pd.Timestamp(end_date) - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-
+        # --- 3. If window is complete, query for the historical max price ---
+        # This path is used for older data, typically during model training.
+        logging.info(
+            "30-day window complete for %s. Querying max price between %s and %s.",
+            ticker,
+            start_date_ts.strftime('%Y-%m-%d'),
+            end_date_window_ts.strftime('%Y-%m-%d')
+        )
+        price_table = os.environ["PRICE_TABLE"]
         max_q = f"""
         SELECT MAX(adj_close) AS max_price
         FROM `{price_table}`
@@ -279,15 +287,17 @@ def get_max_close_30d(ticker: str, call_date: str) -> dict:
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ScalarQueryParameter("ticker", "STRING", ticker),
-                    bigquery.ScalarQueryParameter("start_date", "DATE", start_date),
-                    bigquery.ScalarQueryParameter("end_date", "DATE", str(end_date)),
+                    bigquery.ScalarQueryParameter("start_date", "DATE", start_date_ts.strftime('%Y-%m-%d')),
+                    bigquery.ScalarQueryParameter("end_date", "DATE", end_date_window_ts.strftime('%Y-%m-%d')),
                 ]
             ),
         ).to_dataframe()
 
+        # Return the result, or None if for some reason no price data was found.
         return {"max_close_30d": max_df.at[0, "max_price"]} if not max_df.empty else {"max_close_30d": None}
+
     except Exception as e:
-        logging.error("get_max_close_30d: %s", e)
+        logging.error("get_max_close_30d failed for ticker %s: %s", ticker, e, exc_info=True)
         return {"max_close_30d": None}
 
 # ─────────────────── orchestrator ─────────────────────────
