@@ -1,6 +1,6 @@
 # ProfitScout ML Pipeline
 
-![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.11-blue.svg)
 ![XGBoost](https://img.shields.io/badge/XGBoost-1.7+-brightgreen.svg)
 ![Vertex AI](https://img.shields.io/badge/Vertex_AI-Pipelines_&_Training-ff69b4.svg)
 
@@ -15,7 +15,7 @@ The **ProfitScout ML Pipeline** is an end-to-end, *serverless* system on Google 
 - **Event-Driven Ingestion**: Cloud Storage upload → Cloud Function trigger.  
 - **Scalable Feature Engineering** (Cloud Run microservice):  
   - Gemini-Embedding-001 text embeddings  
-  - Cloud Natural Language sentiment on full transcripts  
+  - LLM-based sentiment scoring using Vertex AI
   - Historical technical indicators  
   - EPS-surprise & other fundamental enrichments  
 - **BigQuery Feature Store**: single source of truth for training & scoring.  
@@ -67,7 +67,7 @@ graph TD
 | Containerization     | Docker, Artifact Registry                                                                             |
 | Language / ML Libs   | Python · scikit-learn · XGBoost · pandas                                                               |
 | GCP SDKs             | google-cloud-aiplatform · kfp · storage · pubsub · bigquery                                            |
-| AI/NLP               | Gemini-Embedding-001 · Cloud Natural Language API                                                     |
+| AI/NLP               | Gemini-Embedding-001 · Vertex AI generative models                                                     |
 
 ---
 
@@ -123,7 +123,7 @@ graph TD
 3. **Deploy ingestion services**  
    ```bash
    # Cloud Function: discovery
-   gcloud functions deploy discover_new_transcripts --gen2 --runtime python39 \
+   gcloud functions deploy discover_new_summary --gen2 --runtime python311 \
      --trigger-resource YOUR_BUCKET \
      --trigger-event google.storage.object.finalize \
      --region us-central1
@@ -145,7 +145,7 @@ graph TD
     --region us-central1
 
    # Cloud Function: merger (scheduled)
-  gcloud functions deploy merge_staging_to_final --gen2 --runtime python39 \
+  gcloud functions deploy merge_staging_to_final --gen2 --runtime python311 \
     --trigger-topic merge-features \
     --region us-central1 \
     --set-env-vars PROJECT_ID=YOUR_PROJECT,STAGING_TABLE=YOUR_DATASET.staging_table,FINAL_TABLE=YOUR_DATASET.feature_store
@@ -155,7 +155,7 @@ graph TD
    ```bash
    python create_training_pipeline.py
    python create_inference_pipeline.py
-   python create_hpo_pipline.py
+   python create_hpo_pipeline.py
    ```
 
 5. **Run a pipeline**
