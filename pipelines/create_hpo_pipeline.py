@@ -49,11 +49,11 @@ def hpo_pipeline(
                 "args": [
                     "--project-id", project,
                     "--source-table", source_table,
-                    "--pca-n", "{{$.trial.parameters['pca_n']}}",
-                    "--xgb-max-depth", "{{$.trial.parameters['xgb_max_depth']}}",
-                    "--xgb-min-child-weight", "{{$.trial.parameters['xgb_min_child_weight']}}",
-                    "--xgb-subsample", "{{$.trial.parameters['xgb_subsample']}}",
-                    "--logreg-c", "{{$.trial.parameters['logreg_c']}}",
+                    "--pca-n", "{{$.trial.parameters.pca_n}}",
+                    "--xgb-max-depth", "{{$.trial.parameters.xgb_max_depth}}",
+                    "--xgb-min-child-weight", "{{$.trial.parameters.xgb_min_child_weight}}",
+                    "--xgb-subsample", "{{$.trial.parameters.xgb_subsample}}",
+                    "--logreg-c", "{{$.trial.parameters.logreg_c}}",
                 ],
             },
         }

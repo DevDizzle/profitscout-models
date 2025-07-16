@@ -239,15 +239,15 @@
                           "--source-table",
                           "{{$.inputs.parameters['pipelinechannel--source_table']}}",
                           "--pca-n",
-                          "{{$.trial.parameters['pca_n']}}",
+                          "{{$.trial.parameters.pca_n}}",
                           "--xgb-max-depth",
-                          "{{$.trial.parameters['xgb_max_depth']}}",
+                          "{{$.trial.parameters.xgb_max_depth}}",
                           "--xgb-min-child-weight",
-                          "{{$.trial.parameters['xgb_min_child_weight']}}",
+                          "{{$.trial.parameters.xgb_min_child_weight}}",
                           "--xgb-subsample",
-                          "{{$.trial.parameters['xgb_subsample']}}",
+                          "{{$.trial.parameters.xgb_subsample}}",
                           "--logreg-c",
-                          "{{$.trial.parameters['logreg_c']}}"
+                          "{{$.trial.parameters.logreg_c}}"
                         ],
                         "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
                       },
