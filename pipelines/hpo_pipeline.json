@@ -121,7 +121,7 @@
     }
   },
   "pipelineInfo": {
-    "description": "Finds the best hyperparameters for ProfitScout.",
+    "description": "Fast HPO sweep with trimmed search space.",
     "name": "profitscout-hpo-pipeline"
   },
   "root": {
@@ -179,9 +179,12 @@
                   "constant": [
                     {
                       "conditional_parameter_specs": [],
-                      "integer_value_spec": {
-                        "max_value": "128",
-                        "min_value": "32"
+                      "discrete_value_spec": {
+                        "values": [
+                          256.0,
+                          384.0,
+                          512.0
+                        ]
                       },
                       "parameter_id": "pca_n",
                       "scale_type": 1.0
@@ -189,8 +192,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "10",
-                        "min_value": "4"
+                        "max_value": "8",
+                        "min_value": "5"
                       },
                       "parameter_id": "xgb_max_depth",
                       "scale_type": 1.0
@@ -198,7 +201,7 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "10",
+                        "max_value": "5",
                         "min_value": "1"
                       },
                       "parameter_id": "xgb_min_child_weight",
@@ -208,7 +211,7 @@
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
                         "max_value": 1.0,
-                        "min_value": 0.7
+                        "min_value": 0.8
                       },
                       "parameter_id": "xgb_subsample",
                       "scale_type": 1.0
@@ -216,8 +219,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 1.0,
-                        "min_value": 0.01
+                        "max_value": 0.5,
+                        "min_value": 0.05
                       },
                       "parameter_id": "logreg_c",
                       "scale_type": 2.0
@@ -272,12 +275,12 @@
           "parameterType": "STRING"
         },
         "max_trial_count": {
-          "defaultValue": 20.0,
+          "defaultValue": 9.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },
         "parallel_trial_count": {
-          "defaultValue": 5.0,
+          "defaultValue": 3.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },
