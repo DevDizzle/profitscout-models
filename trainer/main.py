@@ -33,7 +33,7 @@ EMB_COLS = [
     "key_discussion_points_embedding",
     "sentiment_tone_embedding",
     "short_term_outlook_embedding",
-    "forward_looking_signals_embedding", 
+    "forward_looking_signals_embedding",
 ]
 STATIC_NUM_COLS = [
     "sentiment_score", "sma_20", "ema_50", "rsi_14", "adx_14",
@@ -63,7 +63,7 @@ def load_data(project_id: str, source_table: str, breakout_threshold: float) -> 
           AND earnings_call_date     IS NOT NULL
         """
     ).to_dataframe()
-    logging.info("Loaded %d rows", len(df))  # Fixed format
+    logging.info("Loaded %d rows", len(df))
 
     # convert embedding JSON strings → numpy arrays
     for col in EMB_COLS:
@@ -117,7 +117,7 @@ def preprocess_data(df: pd.DataFrame, params: dict):
         pca = PCA(n_components=params["pca_n"], random_state=params["random_state"])
         train_ids = train_idx.intersection(valid.index)
         pca.fit(np.vstack(df.loc[train_ids, col].values))
-        logging.info(f"PCA for {col}: explained variance ratio sum = {pca.explained_variance_ratio_.sum():.2f}")  # Added for debugging
+        logging.info(f"PCA for {col}: explained variance ratio sum = {pca.explained_variance_ratio_.sum():.2f}")
         transformed = np.full((len(df), params["pca_n"]), np.nan)
         transformed[valid.index] = pca.transform(np.vstack(valid.values))
         X_pca_list.append(transformed)
@@ -168,11 +168,12 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
         {
             "objective": "binary:logistic",
             "eval_metric": "aucpr",
-            "learning_rate": 0.03,
+            "learning_rate": params["learning_rate"],
             "max_depth": params["xgb_max_depth"],
             "min_child_weight": params["xgb_min_child_weight"],
             "subsample": params["xgb_subsample"],
             "colsample_bytree": 0.9,
+            "gamma": params["gamma"],
             "scale_pos_weight": (y_subtr == 0).sum() / max((y_subtr == 1).sum(), 1),
             "n_jobs": -1,
             "random_state": params["random_state"],
@@ -263,6 +264,10 @@ def main():
     parser.add_argument("--logreg_c",               dest="logreg_c", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--blend-weight",           dest="blend_weight", type=float, default=0.5)
     parser.add_argument("--blend_weight",           dest="blend_weight", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--learning-rate",          dest="learning_rate", type=float, default=0.03)
+    parser.add_argument("--learning_rate",          dest="learning_rate", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--gamma",                  dest="gamma", type=float, default=0.0)
+    parser.add_argument("--gamma",                  dest="gamma", type=float, default=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -278,6 +283,8 @@ def main():
         xgb_subsample=args.xgb_subsample,
         logreg_c=args.logreg_c,
         blend_weight=args.blend_weight,
+        learning_rate=args.learning_rate,
+        gamma=args.gamma,
     )
 
     # ── optional experiment tracking ─────────────────────────────
