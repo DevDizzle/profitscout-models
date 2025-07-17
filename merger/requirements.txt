@@ -1,4 +1,0 @@
-# merger/requirements.txt
-
-google-cloud-bigquery
-functions-framework

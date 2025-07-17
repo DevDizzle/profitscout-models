@@ -1,0 +1,6 @@
+# merger/requirements.txt
+google-cloud-bigquery-storage
+google-cloud-bigquery
+functions-framework
+pandas
+db-dtypes

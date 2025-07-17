@@ -224,6 +224,15 @@
                       },
                       "parameter_id": "logreg_c",
                       "scale_type": 2.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "double_value_spec": {
+                        "max_value": 0.7,
+                        "min_value": 0.3
+                      },
+                      "parameter_id": "blend_weight",
+                      "scale_type": 1.0
                     }
                   ]
                 }
@@ -237,17 +246,7 @@
                           "--project-id",
                           "{{$.inputs.parameters['pipelinechannel--project']}}",
                           "--source-table",
-                          "{{$.inputs.parameters['pipelinechannel--source_table']}}",
-                          "--pca-n",
-                          "{{$.trial.parameters.pca_n}}",
-                          "--xgb-max-depth",
-                          "{{$.trial.parameters.xgb_max_depth}}",
-                          "--xgb-min-child-weight",
-                          "{{$.trial.parameters.xgb_min_child_weight}}",
-                          "--xgb-subsample",
-                          "{{$.trial.parameters.xgb_subsample}}",
-                          "--logreg-c",
-                          "{{$.trial.parameters.logreg_c}}"
+                          "{{$.inputs.parameters['pipelinechannel--source_table']}}"
                         ],
                         "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
                       },

@@ -1,15 +1,22 @@
 # FILE: hpo_pipeline.py
 """
-Vertex AI pipeline that launches a Hyperparameter‑Tuning job
+Vertex AI pipeline that launches a Hyperparameter Tuning job
 for the ProfitScout model.
 
 Fast sweep (9 trials, 3 parallel) with:
   • PCA grid {256, 384, 512}
   • Narrow XGBoost / LogReg ranges
-  • Correct Vertex placeholder syntax (flag & value split)
+  • **enable_web_access=True** so the default Vertex AI service‑agent gets the
+    full `cloud‑platform` OAuth scope and experiment tracking works without
+    custom service accounts.
 
 Requirements:
-  pip install --upgrade google-cloud-pipeline-components google-cloud-aiplatform "kfp>=2.6"
+```bash
+python -m pip install --upgrade \
+  google-cloud-pipeline-components \
+  google-cloud-aiplatform \
+  "kfp>=2.6"
+```
 """
 from google.cloud.aiplatform import hyperparameter_tuning as hpt
 from google_cloud_pipeline_components.v1.hyperparameter_tuning_job import (
@@ -30,16 +37,17 @@ TRAINER_IMAGE = (
 # ─────────────────── Pipeline ───────────────────
 @dsl.pipeline(
     name="profitscout-hpo-pipeline",
-    description="Fast HPO sweep with trimmed search space.",
+    description="Targeted HPO sweep focused on prior best trials.",
     pipeline_root=PIPELINE_ROOT,
 )
 def hpo_pipeline(
     project: str = PROJECT_ID,
     location: str = REGION,
     source_table: str = "profit_scout.breakout_features",
-    max_trial_count: int = 9,
+    max_trial_count: int = 30,
     parallel_trial_count: int = 3,
 ):
+    # Vertex AI automatically appends the hyper‑parameter flags.
     worker_pool_specs = [
         {
             "machine_spec": {"machine_type": "n1-standard-8"},
@@ -49,11 +57,6 @@ def hpo_pipeline(
                 "args": [
                     "--project-id", project,
                     "--source-table", source_table,
-                    "--pca-n", "{{$.trial.parameters.pca_n}}",
-                    "--xgb-max-depth", "{{$.trial.parameters.xgb_max_depth}}",
-                    "--xgb-min-child-weight", "{{$.trial.parameters.xgb_min_child_weight}}",
-                    "--xgb-subsample", "{{$.trial.parameters.xgb_subsample}}",
-                    "--logreg-c", "{{$.trial.parameters.logreg_c}}",
                 ],
             },
         }
@@ -61,11 +64,14 @@ def hpo_pipeline(
 
     metric_spec = serialize_metrics({"pr_auc": "maximize"})
     parameter_spec = serialize_parameters({
-        "pca_n":                hpt.DiscreteParameterSpec([256, 384, 512], scale="linear"),
-        "xgb_max_depth":        hpt.IntegerParameterSpec(5, 8,  "linear"),
-        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 5,  "linear"),
+        "pca_n":                hpt.DiscreteParameterSpec([128, 256, 384, 512], scale="linear"),  # Focused lower-mid
+        "xgb_max_depth":        hpt.IntegerParameterSpec(5, 7,  "linear"),  # Around 6
+        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 3,  "linear"),  # Low values
         "xgb_subsample":        hpt.DoubleParameterSpec(0.8, 1.0, "linear"),
-        "logreg_c":             hpt.DoubleParameterSpec(0.05, 0.5, "log"),
+        "logreg_c":             hpt.DoubleParameterSpec(0.05, 0.3, "log"),  # Around 0.1-0.2
+        "blend_weight":         hpt.DoubleParameterSpec(0.5, 0.7, "linear"),  # Slight XGBoost bias
+        "learning_rate":        hpt.DoubleParameterSpec(0.01, 0.05, "log"),  # New: Slower for better convergence
+        "gamma":                hpt.DoubleParameterSpec(0, 0.2, "linear"),   # New: Light pruning
     })
 
     HyperparameterTuningJobRunOp(
