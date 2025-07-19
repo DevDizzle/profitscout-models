@@ -63,4 +63,5 @@ def upsert_row(row: dict, table_id: str, primary_keys: list):
         logging.error(f"BigQuery upsert failed: {e}")
         logging.error(f"Failed query: {query}")
         safe_row = {k: (type(v).__name__ if isinstance(v, list) else v) for k, v in row.items()}
-        logging.error(f"Row data (types simplified): {safe_row}")        raise
+        logging.error(f"Row data (types simplified): {safe_row}")        
+        raise

@@ -79,16 +79,32 @@ def get_embeddings(summary_gcs_path: str) -> dict:
         sections, results = _parse_sections(text), {}
 
         for sec, txt in sections.items():
-            txt = txt.strip()
+            txt = (txt or "").strip()
+            key = f"{sec}_embedding"
+
             if txt:
                 logging.info("Generating embedding for section: %s", sec)
-                emb = embedding_model.get_embeddings([txt])[0]
+                emb = embedding_model.get_embeddings(
+                    [txt],
+                    output_dimensionality=768
+                )[0]
+
                 vec = list(emb.values)
-                results[f"{sec}_embedding"] = vec
-                logging.info("Embedded %s | len=%d | first5=%s", sec, len(vec), vec[:5])
+                vec_np = np.array(vec, dtype=float)
+
+                # L2 normalize
+                norm = np.linalg.norm(vec_np)
+                if norm > 0:
+                    vec_np = vec_np / norm
+
+                results[key] = vec_np.tolist()
+                logging.info(
+                    "Embedded %s | len=%d | first5=%s",
+                    sec, len(vec_np), vec_np[:5]
+                )
             else:
                 logging.warning("Section '%s' is empty. Skipping embedding.", sec)
-                results[f"{sec}_embedding"] = None
+                results[key] = None
 
         return results
     except Exception as e:
@@ -274,7 +290,7 @@ def create_features(message: dict) -> dict | None:
     EMB_COLS_NAMES = [
         "key_financial_metrics_embedding", "key_discussion_points_embedding",
         "sentiment_tone_embedding", "short_term_outlook_embedding",
-        "forward-looking_signals_embedding",
+        "forward_looking_signals_embedding",
     ]
     vecs = {c: np.array(row[c]) for c in EMB_COLS_NAMES if row.get(c) is not None}
     
@@ -288,7 +304,7 @@ def create_features(message: dict) -> dict | None:
         ("cos_fin_disc", "key_financial_metrics_embedding", "key_discussion_points_embedding"),
         ("cos_fin_tone", "key_financial_metrics_embedding", "sentiment_tone_embedding"),
         ("cos_disc_short", "key_discussion_points_embedding", "short_term_outlook_embedding"),
-        ("cos_short_fwd", "short_term_outlook_embedding", "forward-looking_signals_embedding"),
+        ("cos_short_fwd", "short_term_outlook_embedding", "forward_looking_signals_embedding"),
     ]
     for key, col1, col2 in sim_pairs:
         row[key] = safe_cosine(vecs.get(col1, []), vecs.get(col2, []))

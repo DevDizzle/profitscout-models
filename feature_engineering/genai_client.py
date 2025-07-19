@@ -14,7 +14,7 @@ from google.genai import types
 # ── CONFIG  ────────────────────────────────
 PROJECT_ID        = "profitscout-lx6bb"
 LOCATION          = "global"
-MODEL_NAME        = "models/gemini-2.0-flash"
+MODEL_NAME        = "gemini-2.0-flash"
 TEMPERATURE       = 0.2
 MAX_OUTPUT_TOKENS = 8
 CANDIDATE_COUNT   = 1

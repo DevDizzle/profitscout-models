@@ -17,7 +17,7 @@ PUB_SUB_TOPIC_ID = "process-earnings-call"
 BQ_FEATURE_TABLE_ID = "profitscout-lx6bb.profit_scout.staging_breakout_features"
 
 # --- Control how many messages are published per second ---
-PUBLISH_RATE_PER_SECOND = 2
+PUBLISH_RATE_PER_SECOND = 5
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -31,20 +31,18 @@ def get_existing_records():
     """
     logging.info(f"Querying BigQuery table {BQ_FEATURE_TABLE_ID} for existing records...")
     bq_client = bigquery.Client(project=PROJECT_ID)
-    
+
     query = f"""
         SELECT DISTINCT ticker, quarter_end_date
         FROM `{BQ_FEATURE_TABLE_ID}`
     """
-    
+
     try:
         query_job = bq_client.query(query)
         rows = query_job.result()
-        
-        # --- THIS IS THE FIX ---
+
         # Convert the date object to a string (e.g., '2023-09-30') before adding to the set.
         existing_records = {(row.ticker, row.quarter_end_date.isoformat()) for row in rows}
-        # ----------------------
 
         logging.info(f"Found {len(existing_records)} existing records in the feature store.")
         return existing_records
@@ -77,7 +75,7 @@ def backfill_with_rate_limiting():
         try:
             file_name = os.path.basename(blob.name)
             ticker, q_end_str = file_name.removesuffix('.txt').split('_')
-            
+
             # If the (ticker, date) combo is NOT in our set of existing records, add it to the list
             if (ticker, q_end_str) not in existing_records:
                 files_to_process.append(blob)
@@ -85,7 +83,7 @@ def backfill_with_rate_limiting():
         except ValueError:
             logging.warning(f"Could not parse ticker/date from filename: {blob.name}. Skipping.")
             continue
-    
+
     logging.info(f"Total files in GCS: {len(all_blobs)}. Already processed: {len(existing_records)}. New files to process: {len(files_to_process)}")
 
     if not files_to_process:
@@ -95,7 +93,7 @@ def backfill_with_rate_limiting():
     # 4. Publish messages for the new files at a controlled rate
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(PROJECT_ID, PUB_SUB_TOPIC_ID)
-    
+
     # Calculate the delay needed to maintain the desired publishing rate
     delay_between_messages = 1.0 / PUBLISH_RATE_PER_SECOND
 
@@ -104,7 +102,7 @@ def backfill_with_rate_limiting():
         try:
             file_name = os.path.basename(blob.name)
             ticker, q_end_str = file_name.removesuffix('.txt').split('_')
-            
+
             message_data = {
                 "ticker": ticker,
                 "quarter_end_date": q_end_str,
@@ -116,10 +114,10 @@ def backfill_with_rate_limiting():
             future = publisher.publish(topic_path, data=message_bytes)
             future.result()  # Confirm message is received by Pub/Sub
             published_count += 1
-            
+
             if published_count % 50 == 0:
                 logging.info(f"Published {published_count}/{len(files_to_process)} messages...")
-            
+
             # The key to controlling the flow: wait before sending the next message
             time.sleep(delay_between_messages)
 
@@ -128,7 +126,6 @@ def backfill_with_rate_limiting():
 
     logging.info(f"Successfully published all {published_count} new messages at a controlled rate.")
     logging.warning("The feature-engineering service will now process this batch gradually.")
-
 
 if __name__ == "__main__":
     backfill_with_rate_limiting()

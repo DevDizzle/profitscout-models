@@ -3,13 +3,6 @@
 Vertex AI pipeline that launches a Hyperparameter Tuning job
 for the ProfitScout model.
 
-Fast sweep (9 trials, 3 parallel) with:
-  • PCA grid {256, 384, 512}
-  • Narrow XGBoost / LogReg ranges
-  • **enable_web_access=True** so the default Vertex AI service‑agent gets the
-    full `cloud‑platform` OAuth scope and experiment tracking works without
-    custom service accounts.
-
 Requirements:
 ```bash
 python -m pip install --upgrade \
@@ -44,8 +37,8 @@ def hpo_pipeline(
     project: str = PROJECT_ID,
     location: str = REGION,
     source_table: str = "profit_scout.breakout_features",
-    max_trial_count: int = 30,
-    parallel_trial_count: int = 3,
+    max_trial_count: int = 50,
+    parallel_trial_count: int = 5,
 ):
     # Vertex AI automatically appends the hyper‑parameter flags.
     worker_pool_specs = [
@@ -61,17 +54,17 @@ def hpo_pipeline(
             },
         }
     ]
-
     metric_spec = serialize_metrics({"pr_auc": "maximize"})
     parameter_spec = serialize_parameters({
-        "pca_n":                hpt.DiscreteParameterSpec([128, 256, 384, 512], scale="linear"),  # Focused lower-mid
-        "xgb_max_depth":        hpt.IntegerParameterSpec(5, 7,  "linear"),  # Around 6
-        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 3,  "linear"),  # Low values
-        "xgb_subsample":        hpt.DoubleParameterSpec(0.8, 1.0, "linear"),
-        "logreg_c":             hpt.DoubleParameterSpec(0.05, 0.3, "log"),  # Around 0.1-0.2
-        "blend_weight":         hpt.DoubleParameterSpec(0.5, 0.7, "linear"),  # Slight XGBoost bias
-        "learning_rate":        hpt.DoubleParameterSpec(0.01, 0.05, "log"),  # New: Slower for better convergence
-        "gamma":                hpt.DoubleParameterSpec(0, 0.2, "linear"),   # New: Light pruning
+        "pca_n":                hpt.DiscreteParameterSpec([128, 256, 384], scale="linear"),
+        "xgb_max_depth":        hpt.IntegerParameterSpec(4, 6, "linear"),
+        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 3, "linear"),
+        "xgb_subsample":        hpt.DoubleParameterSpec(0.85, 0.95, "linear"),
+        "logreg_c":             hpt.DoubleParameterSpec(0.08, 0.15, "log"),
+        "blend_weight":         hpt.DoubleParameterSpec(0.55, 0.65, "linear"),
+        "learning_rate":        hpt.DoubleParameterSpec(0.015, 0.03, "log"),
+        "gamma":                hpt.DoubleParameterSpec(0.05, 0.15, "linear"),
+        "colsample_bytree":     hpt.DoubleParameterSpec(0.7, 0.9, "linear"),
     })
 
     HyperparameterTuningJobRunOp(

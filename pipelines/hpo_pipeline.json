@@ -121,7 +121,7 @@
     }
   },
   "pipelineInfo": {
-    "description": "Fast HPO sweep with trimmed search space.",
+    "description": "Targeted HPO sweep focused on prior best trials.",
     "name": "profitscout-hpo-pipeline"
   },
   "root": {
@@ -181,9 +181,9 @@
                       "conditional_parameter_specs": [],
                       "discrete_value_spec": {
                         "values": [
+                          128.0,
                           256.0,
-                          384.0,
-                          512.0
+                          384.0
                         ]
                       },
                       "parameter_id": "pca_n",
@@ -192,8 +192,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "8",
-                        "min_value": "5"
+                        "max_value": "6",
+                        "min_value": "4"
                       },
                       "parameter_id": "xgb_max_depth",
                       "scale_type": 1.0
@@ -201,7 +201,7 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "5",
+                        "max_value": "3",
                         "min_value": "1"
                       },
                       "parameter_id": "xgb_min_child_weight",
@@ -210,8 +210,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 1.0,
-                        "min_value": 0.8
+                        "max_value": 0.95,
+                        "min_value": 0.85
                       },
                       "parameter_id": "xgb_subsample",
                       "scale_type": 1.0
@@ -219,8 +219,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.5,
-                        "min_value": 0.05
+                        "max_value": 0.15,
+                        "min_value": 0.08
                       },
                       "parameter_id": "logreg_c",
                       "scale_type": 2.0
@@ -228,10 +228,37 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.7,
-                        "min_value": 0.3
+                        "max_value": 0.65,
+                        "min_value": 0.55
                       },
                       "parameter_id": "blend_weight",
+                      "scale_type": 1.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "double_value_spec": {
+                        "max_value": 0.03,
+                        "min_value": 0.015
+                      },
+                      "parameter_id": "learning_rate",
+                      "scale_type": 2.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "double_value_spec": {
+                        "max_value": 0.15,
+                        "min_value": 0.05
+                      },
+                      "parameter_id": "gamma",
+                      "scale_type": 1.0
+                    },
+                    {
+                      "conditional_parameter_specs": [],
+                      "double_value_spec": {
+                        "max_value": 0.9,
+                        "min_value": 0.7
+                      },
+                      "parameter_id": "colsample_bytree",
                       "scale_type": 1.0
                     }
                   ]
@@ -274,12 +301,12 @@
           "parameterType": "STRING"
         },
         "max_trial_count": {
-          "defaultValue": 9.0,
+          "defaultValue": 50.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },
         "parallel_trial_count": {
-          "defaultValue": 3.0,
+          "defaultValue": 5.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },

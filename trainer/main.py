@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ProfitScout training script – Vertex AI‑ready, HPO‑friendly.
+ProfitScout training script – Vertex AI-ready, HPO-friendly.
 
 • Accepts either hyphen or underscore CLI flags (Vertex passes underscores).
 • Saves model + preprocessing artifacts back to GCS.
@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import tempfile
+import urllib.parse
 import joblib
 import hypertune
 import numpy as np
@@ -51,7 +52,7 @@ for c in EMB_COLS:
 
 # ───────────────── Helpers ─────────────────
 def load_data(project_id: str, source_table: str, breakout_threshold: float) -> pd.DataFrame:
-    """Load & basic‑clean BigQuery training data."""
+    """Load & basic-clean BigQuery training data."""
     logging.info("Loading data from %s.%s", project_id, source_table)
     bq = bigquery.Client(project=project_id)
     df = bq.query(
@@ -65,23 +66,34 @@ def load_data(project_id: str, source_table: str, breakout_threshold: float) -> 
     ).to_dataframe()
     logging.info("Loaded %d rows", len(df))
 
-    # convert embedding JSON strings → numpy arrays
+    # convert embedding JSON strings → numpy arrays with error handling
+    invalid_count = {col: 0 for col in EMB_COLS}
     for col in EMB_COLS:
         if col in df.columns and df[col].dtype == "object":
-            df[col] = df[col].apply(
-                lambda x: np.array(json.loads(x)) if isinstance(x, str) and x.startswith("[") else x
-            )
+            def parse_emb(x):
+                if isinstance(x, str) and x.startswith("["):
+                    try:
+                        return np.array(json.loads(x))
+                    except json.JSONDecodeError:
+                        invalid_count[col] += 1
+                        return np.nan
+                return x
+            df[col] = df[col].apply(parse_emb)
+    for col, count in invalid_count.items():
+        if count > 0:
+            logging.warning("Invalid embeddings in %s: %d rows set to NaN", col, count)
 
     df["earnings_call_date"] = pd.to_datetime(df["earnings_call_date"])
     df.sort_values("earnings_call_date", inplace=True)
     df["breakout"] = (
         (df["max_close_30d"] / df["adj_close_on_call_date"] - 1) >= breakout_threshold
     ).astype(int)
+    logging.info("Breakout rate: %.2f%%", 100 * df["breakout"].mean())
     return df
 
 
 def preprocess_data(df: pd.DataFrame, params: dict):
-    """Winsorize, fill, PCA‑reduce embeddings, return arrays + metadata."""
+    """Winsorize, fill, PCA-reduce embeddings, return arrays + metadata."""
     split_date = df["earnings_call_date"].quantile(0.8, interpolation="nearest")
     train_idx = df[df["earnings_call_date"] < split_date].index
     holdout_idx = df[df["earnings_call_date"] >= split_date].index
@@ -117,12 +129,17 @@ def preprocess_data(df: pd.DataFrame, params: dict):
         pca = PCA(n_components=params["pca_n"], random_state=params["random_state"])
         train_ids = train_idx.intersection(valid.index)
         pca.fit(np.vstack(df.loc[train_ids, col].values))
-        logging.info(f"PCA for {col}: explained variance ratio sum = {pca.explained_variance_ratio_.sum():.2f}")
-        transformed = np.full((len(df), params["pca_n"]), np.nan)
-        transformed[valid.index] = pca.transform(np.vstack(valid.values))
+        evr_sum = pca.explained_variance_ratio_.sum()
+        logging.info(f"PCA for {col}: explained variance ratio sum = {evr_sum:.2f}")
+        if pca.n_components_ < params["pca_n"]:
+            logging.warning(f"PCA for {col} reduced to {pca.n_components_} components (low dim/data)")
+
+        transformed = np.full((len(df), pca.n_components_), np.nan)
+        valid_idx_pos = df.index.get_indexer(valid.index)
+        transformed[valid_idx_pos] = pca.transform(np.vstack(valid.values))
         X_pca_list.append(transformed)
         pca_map[col] = pca
-        pca_cols.extend(f"{col}_pc{i}" for i in range(params["pca_n"]))
+        pca_cols.extend(f"{col}_pc{i}" for i in range(pca.n_components_))
         gc.collect()
 
     X_pca = np.hstack(X_pca_list) if X_pca_list else np.empty((len(df), 0))
@@ -137,85 +154,92 @@ def preprocess_data(df: pd.DataFrame, params: dict):
     y_all = df["breakout"].values
 
     feature_names = pca_cols + final_num_cols
+    logging.info(f"Feature matrix shape: {X_all.shape}, Train/Holdout: {len(train_idx)}/{len(holdout_idx)}")
+    logging.info(f"Train breakout rate: {y_all[train_idx].mean():.2%}, Holdout: {y_all[holdout_idx].mean():.2%}")
     return X_all, y_all, train_idx, holdout_idx, feature_names, pca_map
 
 
 def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, params):
-    """Train XGBoost + LogReg ensemble and compute holdout PR‑AUC."""
-    # Split train into sub-train and validation for XGBoost early stopping
-    split_point = int(len(train_idx) * 0.8)
-    sub_train_idx = train_idx[:split_point]
-    val_idx = train_idx[split_point:]
+    """Train XGBoost + LogReg ensemble and compute holdout PR-AUC."""
+    try:
+        # Split train into sub-train and validation for XGBoost early stopping
+        split_point = int(len(train_idx) * 0.8)
+        sub_train_idx = train_idx[:split_point]
+        val_idx = train_idx[split_point:]
 
-    X_subtr, y_subtr = X_all[sub_train_idx], y_all[sub_train_idx]
-    X_val, y_val = X_all[val_idx], y_all[val_idx]
-    X_tr, y_tr = X_all[train_idx], y_all[train_idx]  # Full train for LogReg and calibrator
-    X_hd, y_hd = X_all[holdout_idx], y_all[holdout_idx]
+        X_subtr, y_subtr = X_all[sub_train_idx], y_all[sub_train_idx]
+        X_val, y_val = X_all[val_idx], y_all[val_idx]
+        X_tr, y_tr = X_all[train_idx], y_all[train_idx]  # Full train for LogReg and calibrator
+        X_hd, y_hd = X_all[holdout_idx], y_all[holdout_idx]
 
-    blend_weight = params.get("blend_weight", 0.5)
+        blend_weight = params.get("blend_weight", 0.5)
 
-    # impute + scale for LogReg (fit on full train)
-    imputer = SimpleImputer(strategy="median").fit(X_tr)
-    scaler = StandardScaler().fit(imputer.transform(X_tr))
+        # impute + scale for LogReg (fit on full train)
+        imputer = SimpleImputer(strategy="median").fit(X_tr)
+        scaler = StandardScaler().fit(imputer.transform(X_tr))
 
-    X_tr_scaled = scaler.transform(imputer.transform(X_tr))
-    X_hd_scaled = scaler.transform(imputer.transform(X_hd))
+        X_tr_scaled = scaler.transform(imputer.transform(X_tr))
+        X_hd_scaled = scaler.transform(imputer.transform(X_hd))
 
-    # XGBoost with validation for early stopping
-    dsubtr = xgb.DMatrix(X_subtr, y_subtr, feature_names=feature_names)
-    dval = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
-    bst = xgb.train(
-        {
-            "objective": "binary:logistic",
-            "eval_metric": "aucpr",
-            "learning_rate": params["learning_rate"],
-            "max_depth": params["xgb_max_depth"],
-            "min_child_weight": params["xgb_min_child_weight"],
-            "subsample": params["xgb_subsample"],
-            "colsample_bytree": 0.9,
-            "gamma": params["gamma"],
-            "scale_pos_weight": (y_subtr == 0).sum() / max((y_subtr == 1).sum(), 1),
-            "n_jobs": -1,
-            "random_state": params["random_state"],
-        },
-        dsubtr,
-        num_boost_round=2000,
-        evals=[(dval, "val")],
-        early_stopping_rounds=params["early_stopping_rounds"],
-        verbose_eval=False,
-    )
+        # XGBoost with validation for early stopping
+        dsubtr = xgb.DMatrix(X_subtr, y_subtr, feature_names=feature_names)
+        dval = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
+        bst = xgb.train(
+            {
+                "objective": "binary:logistic",
+                "eval_metric": "aucpr",
+                "learning_rate": params["learning_rate"],
+                "max_depth": params["xgb_max_depth"],
+                "min_child_weight": params["xgb_min_child_weight"],
+                "subsample": params["xgb_subsample"],
+                "colsample_bytree": params["colsample_bytree"],
+                "gamma": params["gamma"],
+                "scale_pos_weight": (y_subtr == 0).sum() / max((y_subtr == 1).sum(), 1),
+                "tree_method": "hist",  # Faster for high-dim features
+                "n_jobs": -1,
+                "random_state": params["random_state"],
+            },
+            dsubtr,
+            num_boost_round=3000,
+            evals=[(dval, "val")],
+            early_stopping_rounds=150,
+            verbose_eval=False,
+        )
 
-    # Logistic regression (fit on full train)
-    logreg = LogisticRegression(
-        max_iter=500, C=params["logreg_c"], solver="lbfgs", random_state=params["random_state"]
-    ).fit(X_tr_scaled, y_tr)
+        # Logistic regression (fit on full train)
+        logreg = LogisticRegression(
+            max_iter=1000, C=params["logreg_c"], penalty='elasticnet', l1_ratio=0.3, solver='saga', random_state=params["random_state"]
+        ).fit(X_tr_scaled, y_tr)
 
-    # Compute blends on full train for calibration
-    dtr = xgb.DMatrix(X_tr, y_tr, feature_names=feature_names)
-    xgb_raw_tr = bst.predict(dtr, iteration_range=(0, bst.best_iteration + 1))
-    log_raw_tr = logreg.predict_proba(X_tr_scaled)[:, 1]
-    blend_raw_tr = blend_weight * xgb_raw_tr + (1 - blend_weight) * log_raw_tr
-    calibrator = IsotonicRegression(out_of_bounds="clip").fit(blend_raw_tr, y_tr)
+        # Compute blends on full train for calibration
+        dtr = xgb.DMatrix(X_tr, y_tr, feature_names=feature_names)
+        xgb_raw_tr = bst.predict(dtr, iteration_range=(0, bst.best_iteration + 1))
+        log_raw_tr = logreg.predict_proba(X_tr_scaled)[:, 1]
+        blend_raw_tr = blend_weight * xgb_raw_tr + (1 - blend_weight) * log_raw_tr
+        calibrator = IsotonicRegression(out_of_bounds="clip").fit(blend_raw_tr, y_tr)
 
-    # Blend on holdout and calibrate for evaluation
-    dhd = xgb.DMatrix(X_hd, y_hd, feature_names=feature_names)
-    xgb_raw_hd = bst.predict(dhd, iteration_range=(0, bst.best_iteration + 1))
-    log_raw_hd = logreg.predict_proba(X_hd_scaled)[:, 1]
-    blend_raw_hd = blend_weight * xgb_raw_hd + (1 - blend_weight) * log_raw_hd
-    blend_cal_hd = calibrator.transform(blend_raw_hd)
+        # Blend on holdout and calibrate for evaluation
+        dhd = xgb.DMatrix(X_hd, y_hd, feature_names=feature_names)
+        xgb_raw_hd = bst.predict(dhd, iteration_range=(0, bst.best_iteration + 1))
+        log_raw_hd = logreg.predict_proba(X_hd_scaled)[:, 1]
+        blend_raw_hd = blend_weight * xgb_raw_hd + (1 - blend_weight) * log_raw_hd
+        blend_cal_hd = calibrator.transform(blend_raw_hd)
 
-    prec, rec, _ = precision_recall_curve(y_hd, blend_cal_hd)
-    pr_auc = auc(rec, prec)
+        prec, rec, _ = precision_recall_curve(y_hd, blend_cal_hd)
+        pr_auc = auc(rec, prec)
 
-    metrics = {"pr_auc": pr_auc}
-    artifacts = dict(
-        imputer=imputer,
-        scaler=scaler,
-        logreg=logreg,
-        calibrator=calibrator,
-        threshold=0.5,
-    )
-    return bst, metrics, artifacts
+        metrics = {"pr_auc": pr_auc}
+        artifacts = dict(
+            imputer=imputer,
+            scaler=scaler,
+            logreg=logreg,
+            calibrator=calibrator,
+            threshold=0.5,
+        )
+        return bst, metrics, artifacts
+    except Exception as e:
+        logging.error("Error during training/evaluation: %s", e)
+        raise
 
 
 def save_artifacts(bst, artifacts, pca_map, model_dir: str):
@@ -224,6 +248,11 @@ def save_artifacts(bst, artifacts, pca_map, model_dir: str):
         logging.error("model_dir must be a GCS path, got %s", model_dir)
         return
 
+    # parse GCS URI safely
+    parsed = urllib.parse.urlparse(model_dir)
+    bucket_name = parsed.netloc
+    prefix = parsed.path.lstrip("/")
+
     # dump files to a temp dir first
     with tempfile.TemporaryDirectory() as tmp:
         joblib.dump(bst,        os.path.join(tmp, "xgb_model.joblib"))
@@ -231,12 +260,10 @@ def save_artifacts(bst, artifacts, pca_map, model_dir: str):
         joblib.dump(pca_map,    os.path.join(tmp, "pca_map.joblib"))
 
         # upload to GCS
-        bucket_name, *path_parts = model_dir[5:].split("/", 1)
-        prefix = path_parts[0] if path_parts else ""
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         for fname in os.listdir(tmp):
-            blob = bucket.blob(f"{prefix}/{fname}".lstrip("/"))
+            blob = bucket.blob(os.path.join(prefix, fname).lstrip("/"))
             blob.upload_from_filename(os.path.join(tmp, fname))
             logging.info("Uploaded %s to gs://%s/%s", fname, bucket_name, blob.name)
 
@@ -251,7 +278,7 @@ def main():
     parser.add_argument("--run-name",
                         default=f"run-{pd.Timestamp.now():%Y%m%d-%H%M%S}")
 
-    # hyper‑parameters – hyphen + underscore forms
+    # hyper-parameters – hyphen + underscore forms
     parser.add_argument("--pca-n",                  dest="pca_n", type=int,   default=64)
     parser.add_argument("--pca_n",                  dest="pca_n", type=int,   default=argparse.SUPPRESS)
     parser.add_argument("--xgb-max-depth",          dest="xgb_max_depth", type=int, default=7)
@@ -267,14 +294,15 @@ def main():
     parser.add_argument("--learning-rate",          dest="learning_rate", type=float, default=0.03)
     parser.add_argument("--learning_rate",          dest="learning_rate", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--gamma",                  dest="gamma", type=float, default=0.0)
-    parser.add_argument("--gamma",                  dest="gamma", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--colsample-bytree",       dest="colsample_bytree", type=float, default=0.9)
+    parser.add_argument("--colsample_bytree",       dest="colsample_bytree", type=float, default=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
     params = dict(
         pca_n=args.pca_n,
         random_state=42,
-        early_stopping_rounds=100,
+        early_stopping_rounds=150,
         thresh_req_recall=0.5,
         winsor_quantiles=(0.01, 0.99),
         breakout_threshold=0.12,
@@ -285,6 +313,7 @@ def main():
         blend_weight=args.blend_weight,
         learning_rate=args.learning_rate,
         gamma=args.gamma,
+        colsample_bytree=args.colsample_bytree,
     )
 
     # ── optional experiment tracking ─────────────────────────────
@@ -302,28 +331,32 @@ def main():
         logging.warning("Skipping Vertex AI experiment tracking: %s", e)
     # ─────────────────────────────────────────────────────────────
 
-    df = load_data(args.project_id, args.source_table, params["breakout_threshold"])
-    X_all, y_all, train_idx, holdout_idx, f_names, pca_map = preprocess_data(df, params)
-    bst, metrics, artifacts = train_and_evaluate(
-        X_all, y_all, train_idx, holdout_idx, f_names, params
-    )
+    try:
+        df = load_data(args.project_id, args.source_table, params["breakout_threshold"])
+        X_all, y_all, train_idx, holdout_idx, f_names, pca_map = preprocess_data(df, params)
+        bst, metrics, artifacts = train_and_evaluate(
+            X_all, y_all, train_idx, holdout_idx, f_names, params
+        )
 
-    # report to HPT
-    hypertune.HyperTune().report_hyperparameter_tuning_metric(
-        hyperparameter_metric_tag="pr_auc",
-        metric_value=metrics["pr_auc"],
-        global_step=1,
-    )
-    if experiment_ok:
-        aiplatform.log_metrics(metrics)
+        # report to HPT
+        hypertune.HyperTune().report_hyperparameter_tuning_metric(
+            hyperparameter_metric_tag="pr_auc",
+            metric_value=metrics["pr_auc"],
+            global_step=1,
+        )
+        if experiment_ok:
+            aiplatform.log_metrics(metrics)
 
-    model_dir = os.environ.get("AIP_MODEL_DIR")
-    if model_dir:
-        save_artifacts(bst, artifacts, pca_map, model_dir)
-        if experiment_ok:  # Guarded to avoid error if init failed
-            aiplatform.log_params({"model_dir": model_dir})
+        model_dir = os.environ.get("AIP_MODEL_DIR")
+        if model_dir:
+            save_artifacts(bst, artifacts, pca_map, model_dir)
+            if experiment_ok:  # Guarded to avoid error if init failed
+                aiplatform.log_params({"model_dir": model_dir})
 
-    logging.info("Training run complete.")
+        logging.info("Training run complete.")
+    except Exception as e:
+        logging.error("Training failed: %s", e)
+        raise
 
 
 if __name__ == "__main__":
