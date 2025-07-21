@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from google.cloud import aiplatform, bigquery, storage
+from imblearn.over_sampling import SMOTE
 from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -35,6 +36,7 @@ EMB_COLS = [
     "sentiment_tone_embedding",
     "short_term_outlook_embedding",
     "forward_looking_signals_embedding",
+    "qa_summary_embedding",
 ]
 STATIC_NUM_COLS = [
     "sentiment_score", "sma_20", "ema_50", "rsi_14", "adx_14",
@@ -49,6 +51,11 @@ ENGINEERED_COLS = [
 for c in EMB_COLS:
     base = c.replace("_embedding", "")
     ENGINEERED_COLS.extend([f"{base}_norm", f"{base}_mean", f"{base}_std"])
+
+LDA_COLS = [f"lda_topic_{i}" for i in range(10)]
+FINBERT_COLS = []
+for sec in ["key_financial_metrics", "key_discussion_points", "sentiment_tone", "short_term_outlook", "forward_looking_signals", "qa_summary"]:
+    FINBERT_COLS.extend([f"{sec}_pos_prob", f"{sec}_neg_prob", f"{sec}_neu_prob"])
 
 # ───────────────── Helpers ─────────────────
 def load_data(project_id: str, source_table: str, breakout_threshold: float) -> pd.DataFrame:
@@ -66,22 +73,29 @@ def load_data(project_id: str, source_table: str, breakout_threshold: float) -> 
     ).to_dataframe()
     logging.info("Loaded %d rows", len(df))
 
-    # convert embedding JSON strings → numpy arrays with error handling
+    # convert embedding JSON strings/lists → numpy arrays with error handling
     invalid_count = {col: 0 for col in EMB_COLS}
     for col in EMB_COLS:
-        if col in df.columns and df[col].dtype == "object":
+        if col in df.columns:
             def parse_emb(x):
-                if isinstance(x, str) and x.startswith("["):
-                    try:
-                        return np.array(json.loads(x))
-                    except json.JSONDecodeError:
+                try:
+                    if isinstance(x, str) and x.startswith("["):
+                        arr = np.array(json.loads(x), dtype=np.float32)
+                    elif isinstance(x, (list, np.ndarray)):
+                        arr = np.array(x, dtype=np.float32)
+                    else:
+                        return np.nan
+                    if arr.size == 0 or arr.ndim != 1:  # Ensure non-empty 1D vector
                         invalid_count[col] += 1
                         return np.nan
-                return x
+                    return arr
+                except Exception:
+                    invalid_count[col] += 1
+                    return np.nan
             df[col] = df[col].apply(parse_emb)
     for col, count in invalid_count.items():
         if count > 0:
-            logging.warning("Invalid embeddings in %s: %d rows set to NaN", col, count)
+            logging.warning("Invalid/empty embeddings in %s: %d rows set to NaN", col, count)
 
     df["earnings_call_date"] = pd.to_datetime(df["earnings_call_date"])
     df.sort_values("earnings_call_date", inplace=True)
@@ -99,7 +113,8 @@ def preprocess_data(df: pd.DataFrame, params: dict):
     holdout_idx = df[df["earnings_call_date"] >= split_date].index
 
     # winsorize numeric features
-    for col in STATIC_NUM_COLS:
+    num_cols_to_winsor = STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS
+    for col in num_cols_to_winsor:
         if col in df.columns:
             lo, hi = df.loc[train_idx, col].quantile(params["winsor_quantiles"])
             df[col] = df[col].clip(lo, hi)
@@ -124,16 +139,39 @@ def preprocess_data(df: pd.DataFrame, params: dict):
             continue
         valid = df[col].dropna()
         if valid.empty:
+            logging.warning(f"No valid embeddings for {col}, skipping PCA")
             continue
 
-        pca = PCA(n_components=params["pca_n"], random_state=params["random_state"])
-        train_ids = train_idx.intersection(valid.index)
-        pca.fit(np.vstack(df.loc[train_ids, col].values))
-        evr_sum = pca.explained_variance_ratio_.sum()
-        logging.info(f"PCA for {col}: explained variance ratio sum = {evr_sum:.2f}")
-        if pca.n_components_ < params["pca_n"]:
-            logging.warning(f"PCA for {col} reduced to {pca.n_components_} components (low dim/data)")
+        # Ensure consistent embedding dimension (filter outliers if any)
+        emb_lengths = valid.apply(lambda x: x.shape[0])
+        if len(emb_lengths.unique()) > 1:
+            common_len = emb_lengths.mode()[0]
+            logging.warning(f"Inconsistent embedding lengths in {col}; keeping only length {common_len}")
+            valid = valid[emb_lengths == common_len]
+        if valid.empty:
+            continue
 
+        train_ids = train_idx.intersection(valid.index)
+        n_train = len(train_ids)
+        if n_train == 0:
+            logging.warning(f"No valid training embeddings for {col}, skipping PCA")
+            continue
+
+        stacked_train = np.vstack(df.loc[train_ids, col].values)
+        emb_dim = stacked_train.shape[1]
+        pca_n = min(params["pca_n"], min(n_train, emb_dim))
+        if pca_n == 0:
+            logging.warning(f"Zero components for {col}, skipping PCA")
+            continue
+
+        pca = PCA(n_components=pca_n, random_state=params["random_state"])
+        pca.fit(stacked_train)
+        evr_sum = pca.explained_variance_ratio_.sum()
+        logging.info(f"PCA for {col}: {pca_n} components, explained variance ratio sum = {evr_sum:.2f}")
+        if pca.n_components_ < pca_n:
+            logging.warning(f"PCA for {col} reduced to {pca.n_components_} components (low rank/samples)")
+
+        # Transform all valid (including holdout)
         transformed = np.full((len(df), pca.n_components_), np.nan)
         valid_idx_pos = df.index.get_indexer(valid.index)
         transformed[valid_idx_pos] = pca.transform(np.vstack(valid.values))
@@ -144,8 +182,8 @@ def preprocess_data(df: pd.DataFrame, params: dict):
 
     X_pca = np.hstack(X_pca_list) if X_pca_list else np.empty((len(df), 0))
 
-    final_num_cols = [c for c in STATIC_NUM_COLS + ENGINEERED_COLS if c in df.columns]
-    missing_cols = set(STATIC_NUM_COLS + ENGINEERED_COLS) - set(df.columns)
+    final_num_cols = [c for c in STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS if c in df.columns]
+    missing_cols = set(STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS) - set(df.columns)
     if missing_cols:
         logging.warning(f"Missing columns: {missing_cols} – proceeding without them")
     X_num = df[final_num_cols].to_numpy(dtype=np.float32)
@@ -181,8 +219,16 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
         X_tr_scaled = scaler.transform(imputer.transform(X_tr))
         X_hd_scaled = scaler.transform(imputer.transform(X_hd))
 
+        # Apply SMOTE if enabled for XGBoost sub-train
+        if params["use_smote"]:
+            logging.info("Applying SMOTE to sub-train for XGBoost")
+            smote = SMOTE(random_state=params["random_state"])
+            X_subtr_res, y_subtr_res = smote.fit_resample(X_subtr, y_subtr)
+        else:
+            X_subtr_res, y_subtr_res = X_subtr, y_subtr
+
         # XGBoost with validation for early stopping
-        dsubtr = xgb.DMatrix(X_subtr, y_subtr, feature_names=feature_names)
+        dsubtr = xgb.DMatrix(X_subtr_res, y_subtr_res, feature_names=feature_names)
         dval = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
         bst = xgb.train(
             {
@@ -194,7 +240,9 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
                 "subsample": params["xgb_subsample"],
                 "colsample_bytree": params["colsample_bytree"],
                 "gamma": params["gamma"],
-                "scale_pos_weight": (y_subtr == 0).sum() / max((y_subtr == 1).sum(), 1),
+                "scale_pos_weight": params["scale_pos_weight"],  # Now tunable
+                "alpha": params["alpha"],  # New: L1 reg
+                "lambda": params["reg_lambda"],  # New: L2 reg
                 "tree_method": "hist",  # Faster for high-dim features
                 "n_jobs": -1,
                 "random_state": params["random_state"],
@@ -206,10 +254,18 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
             verbose_eval=False,
         )
 
-        # Logistic regression (fit on full train)
+        # Apply SMOTE if enabled for LogReg train
+        if params["use_smote"]:
+            logging.info("Applying SMOTE to train for LogReg")
+            smote = SMOTE(random_state=params["random_state"])
+            X_tr_scaled_res, y_tr_res = smote.fit_resample(X_tr_scaled, y_tr)
+        else:
+            X_tr_scaled_res, y_tr_res = X_tr_scaled, y_tr
+
+        # Logistic regression (fit on full train, potentially oversampled)
         logreg = LogisticRegression(
             max_iter=1000, C=params["logreg_c"], penalty='elasticnet', l1_ratio=0.3, solver='saga', random_state=params["random_state"]
-        ).fit(X_tr_scaled, y_tr)
+        ).fit(X_tr_scaled_res, y_tr_res)
 
         # Compute blends on full train for calibration
         dtr = xgb.DMatrix(X_tr, y_tr, feature_names=feature_names)
@@ -279,23 +335,32 @@ def main():
                         default=f"run-{pd.Timestamp.now():%Y%m%d-%H%M%S}")
 
     # hyper-parameters – hyphen + underscore forms
-    parser.add_argument("--pca-n",                  dest="pca_n", type=int,   default=64)
+    parser.add_argument("--pca-n",                  dest="pca_n", type=int,   default=128)
     parser.add_argument("--pca_n",                  dest="pca_n", type=int,   default=argparse.SUPPRESS)
-    parser.add_argument("--xgb-max-depth",          dest="xgb_max_depth", type=int, default=7)
+    parser.add_argument("--xgb-max-depth",          dest="xgb_max_depth", type=int, default=5)
     parser.add_argument("--xgb_max_depth",          dest="xgb_max_depth", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--xgb-min-child-weight",   dest="xgb_min_child_weight", type=int, default=5)
+    parser.add_argument("--xgb-min-child-weight",   dest="xgb_min_child_weight", type=int, default=2)
     parser.add_argument("--xgb_min_child_weight",   dest="xgb_min_child_weight", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--xgb-subsample",          dest="xgb_subsample", type=float, default=0.8)
+    parser.add_argument("--xgb-subsample",          dest="xgb_subsample", type=float, default=0.9)
     parser.add_argument("--xgb_subsample",          dest="xgb_subsample", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--logreg-c",               dest="logreg_c", type=float, default=0.1)
     parser.add_argument("--logreg_c",               dest="logreg_c", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--blend-weight",           dest="blend_weight", type=float, default=0.5)
+    parser.add_argument("--blend-weight",           dest="blend_weight", type=float, default=0.6)
     parser.add_argument("--blend_weight",           dest="blend_weight", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--learning-rate",          dest="learning_rate", type=float, default=0.03)
+    parser.add_argument("--learning-rate",          dest="learning_rate", type=float, default=0.02)
     parser.add_argument("--learning_rate",          dest="learning_rate", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--gamma",                  dest="gamma", type=float, default=0.0)
+    parser.add_argument("--gamma",                  dest="gamma", type=float, default=0.1)
     parser.add_argument("--colsample-bytree",       dest="colsample_bytree", type=float, default=0.9)
     parser.add_argument("--colsample_bytree",       dest="colsample_bytree", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--scale-pos-weight",       dest="scale_pos_weight", type=float, default=1.0)
+    parser.add_argument("--scale_pos_weight",       dest="scale_pos_weight", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--alpha",                  dest="alpha", type=float, default=0.0)
+    parser.add_argument("--reg-lambda",             dest="reg_lambda", type=float, default=1.0)
+    parser.add_argument("--reg_lambda",             dest="reg_lambda", type=float, default=argparse.SUPPRESS)
+    # Add both hyphen and underscore for use_smote
+    parser.add_argument("--use-smote",              dest="use_smote", type=str, default="false")
+    parser.add_argument("--use_smote",              dest="use_smote", type=str, default=argparse.SUPPRESS)
+    parser.add_argument("--feature-selection",      dest="feature_selection", action="store_true")
 
     args = parser.parse_args()
 
@@ -314,6 +379,11 @@ def main():
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         colsample_bytree=args.colsample_bytree,
+        scale_pos_weight=args.scale_pos_weight,
+        alpha=args.alpha,
+        reg_lambda=args.reg_lambda,
+        use_smote=(args.use_smote.lower() == 'true'),
+        feature_selection=args.feature_selection,
     )
 
     # ── optional experiment tracking ─────────────────────────────
@@ -338,12 +408,19 @@ def main():
             X_all, y_all, train_idx, holdout_idx, f_names, params
         )
 
-        # report to HPT
-        hypertune.HyperTune().report_hyperparameter_tuning_metric(
-            hyperparameter_metric_tag="pr_auc",
-            metric_value=metrics["pr_auc"],
-            global_step=1,
-        )
+        # Always log PR-AUC for visibility
+        logging.info(f"Holdout PR-AUC: {metrics['pr_auc']:.4f}")
+
+        # report to HPT if in HPO context
+        try:
+            hypertune.HyperTune().report_hyperparameter_tuning_metric(
+                hyperparameter_metric_tag="pr_auc",
+                metric_value=metrics["pr_auc"],
+                global_step=1,
+            )
+        except Exception as hypertune_err:
+            logging.info("Not in HPO context, skipping hypertune report: %s", hypertune_err)
+
         if experiment_ok:
             aiplatform.log_metrics(metrics)
 

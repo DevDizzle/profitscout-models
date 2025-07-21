@@ -8,6 +8,12 @@ from google.cloud import storage, aiplatform, bigquery, secretmanager
 from vertexai.language_models import TextEmbeddingModel
 from genai_client import generate 
 from . import bq
+import gensim
+from gensim.utils import simple_preprocess
+import gensim.corpora as corpora
+from gensim.models import LdaModel
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
 
 # ───────────────────────── init ────────────────────────────
 PROJECT_ID = os.environ.get("PROJECT_ID")
@@ -48,6 +54,7 @@ SECTION_PATTERNS = {
     'sentiment_tone'         : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Sentiment Tone\b.*',         re.I),
     'short_term_outlook'     : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Short\-?Term Outlook\b.*',   re.I),
     'forward_looking_signals': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Forward\-?Looking Signals\b.*', re.I),
+    'qa_summary'             : re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Q&A Summary\b.*',            re.I),
 }
 
 def _parse_sections(md: str) -> dict:
@@ -254,6 +261,61 @@ def get_max_close_30d(ticker: str, call_date: str) -> dict:
         logging.error("get_max_close_30d failed for ticker %s: %s", ticker, e)
         return {"max_close_30d": None}
 
+def get_lda_topics(summary_gcs_path: str) -> dict:
+    stop_words = {
+        'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've", "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're', 've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn', "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn', "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't", 'won', "won't", 'wouldn', "wouldn't"
+    }
+    try:
+        bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
+        text = storage_client.bucket(bucket).blob(blob).download_as_text()
+        if not text.strip():
+            logging.warning("Empty summary for LDA at %s", summary_gcs_path)
+            return {f"lda_topic_{i}": 0.0 for i in range(10)}
+
+        full_text = text.strip()
+        tokens = [word for word in simple_preprocess(full_text) if word not in stop_words and len(word) > 2]
+        if not tokens:
+            return {f"lda_topic_{i}": 0.0 for i in range(10)}
+
+        dictionary = corpora.Dictionary([tokens])
+        corpus = [dictionary.doc2bow(tokens)]
+        lda = LdaModel(corpus=corpus, id2word=dictionary, num_topics=10, passes=10, iterations=100, random_state=42)
+        topic_probs = lda.get_document_topics(corpus[0], minimum_probability=0.0)
+        probs = [0.0] * 10
+        for topic_id, prob in topic_probs:
+            probs[topic_id] = prob
+        return {f"lda_topic_{i}": probs[i] for i in range(10)}
+    except Exception as e:
+        logging.error("get_lda_topics: %s", e)
+        return {f"lda_topic_{i}": None for i in range(10)}
+
+def get_finbert_sentiments(summary_gcs_path: str) -> dict:
+    try:
+        bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
+        text = storage_client.bucket(bucket).blob(blob).download_as_text()
+        sections = _parse_sections(text)
+        results = {}
+        tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
+        model = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert")
+        for sec, txt in sections.items():
+            txt = txt.strip()
+            if not txt:
+                results[f"{sec}_pos_prob"] = None
+                results[f"{sec}_neg_prob"] = None
+                results[f"{sec}_neu_prob"] = None
+                continue
+            inputs = tokenizer(txt, return_tensors="pt", truncation=True, padding=True, max_length=512)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            probs = torch.softmax(outputs.logits, dim=-1)[0].tolist()
+            results[f"{sec}_pos_prob"] = probs[0]
+            results[f"{sec}_neg_prob"] = probs[1]
+            results[f"{sec}_neu_prob"] = probs[2]
+        return results
+    except Exception as e:
+        logging.error("get_finbert_sentiments: %s", e)
+        return {}
+
 def create_features(message: dict) -> dict | None:
     """Orchestrates feature creation and returns a complete row for BigQuery."""
     required_keys = ["ticker", "quarter_end_date", "summary_gcs_path", "transcript_gcs_path"]
@@ -290,7 +352,7 @@ def create_features(message: dict) -> dict | None:
     EMB_COLS_NAMES = [
         "key_financial_metrics_embedding", "key_discussion_points_embedding",
         "sentiment_tone_embedding", "short_term_outlook_embedding",
-        "forward_looking_signals_embedding",
+        "forward_looking_signals_embedding", "qa_summary_embedding",
     ]
     vecs = {c: np.array(row[c]) for c in EMB_COLS_NAMES if row.get(c) is not None}
     
@@ -324,6 +386,9 @@ def create_features(message: dict) -> dict | None:
     if row.get("adx_14") is not None:
         row["adx_log1p"] = np.log1p(row["adx_14"])
     # --- [END OF NEW BLOCK] ---
+
+    row.update(get_lda_topics(message["summary_gcs_path"]))
+    row.update(get_finbert_sentiments(message["summary_gcs_path"]))
 
     if not {"earnings_call_date", "sentiment_score"}.issubset(row):
         logging.error(f"Failed to generate critical features for {ticker}. Aborting row.")

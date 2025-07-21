@@ -10,3 +10,4 @@ gcsfs
 cloudml-hypertune
 numpy
 db-dtypes
+imbalanced-learn

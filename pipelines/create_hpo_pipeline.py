@@ -30,7 +30,7 @@ TRAINER_IMAGE = (
 # ─────────────────── Pipeline ───────────────────
 @dsl.pipeline(
     name="profitscout-hpo-pipeline",
-    description="Targeted HPO sweep focused on prior best trials.",
+    description="Final HPO round with 50 trials, focused on top hyps + smote.",
     pipeline_root=PIPELINE_ROOT,
 )
 def hpo_pipeline(
@@ -38,9 +38,8 @@ def hpo_pipeline(
     location: str = REGION,
     source_table: str = "profit_scout.breakout_features",
     max_trial_count: int = 50,
-    parallel_trial_count: int = 5,
+    parallel_trial_count: int = 3,
 ):
-    # Vertex AI automatically appends the hyper‑parameter flags.
     worker_pool_specs = [
         {
             "machine_spec": {"machine_type": "n1-standard-8"},
@@ -56,15 +55,19 @@ def hpo_pipeline(
     ]
     metric_spec = serialize_metrics({"pr_auc": "maximize"})
     parameter_spec = serialize_parameters({
-        "pca_n":                hpt.DiscreteParameterSpec([128, 256, 384], scale="linear"),
-        "xgb_max_depth":        hpt.IntegerParameterSpec(4, 6, "linear"),
-        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 3, "linear"),
-        "xgb_subsample":        hpt.DoubleParameterSpec(0.85, 0.95, "linear"),
-        "logreg_c":             hpt.DoubleParameterSpec(0.08, 0.15, "log"),
-        "blend_weight":         hpt.DoubleParameterSpec(0.55, 0.65, "linear"),
-        "learning_rate":        hpt.DoubleParameterSpec(0.015, 0.03, "log"),
-        "gamma":                hpt.DoubleParameterSpec(0.05, 0.15, "linear"),
-        "colsample_bytree":     hpt.DoubleParameterSpec(0.7, 0.9, "linear"),
+        "pca_n":                hpt.DiscreteParameterSpec([128, 192, 256], scale="linear"),  # Focused around 128
+        "xgb_max_depth":        hpt.IntegerParameterSpec(5, 7, "linear"),  # Around 6
+        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 3, "linear"),  # Around 2
+        "xgb_subsample":        hpt.DoubleParameterSpec(0.85, 0.95, "linear"),  # Around 0.9
+        "logreg_c":             hpt.DoubleParameterSpec(0.08, 0.12, "log"),  # Around 0.1
+        "blend_weight":         hpt.DoubleParameterSpec(0.55, 0.65, "linear"),  # Around 0.6
+        "learning_rate":        hpt.DoubleParameterSpec(0.015, 0.025, "log"),  # Around 0.02
+        "gamma":                hpt.DoubleParameterSpec(0.05, 0.15, "linear"),  # Around 0.09
+        "colsample_bytree":     hpt.DoubleParameterSpec(0.85, 0.95, "linear"),  # Around 0.9
+        "scale_pos_weight":     hpt.DoubleParameterSpec(5.0, 15.0, "log"),  # Focused higher
+        "alpha":                hpt.DoubleParameterSpec(1e-5, 0.05, "log"),
+        "reg_lambda":           hpt.DoubleParameterSpec(1e-5, 0.05, "log"),
+        "use_smote":            hpt.CategoricalParameterSpec(['true', 'false']),  # New discrete for SMOTE
     })
 
     HyperparameterTuningJobRunOp(
