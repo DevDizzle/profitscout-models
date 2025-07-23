@@ -4,6 +4,10 @@ FROM python:3.11-slim
 # Set the working directory in the container
 WORKDIR /app
 
+# Add the app directory to the PYTHONPATH
+# This ensures Python can find your modules
+ENV PYTHONPATH "${PYTHONPATH}:/app"
+
 # Copy the current directory contents into the container at /app
 COPY . /app
 
@@ -20,4 +24,4 @@ EXPOSE 8080
 ENV PORT 8080
 
 # Run main.py when the container launches using Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "feature_engineering.main:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "main:app"]

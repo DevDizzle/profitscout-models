@@ -7,7 +7,6 @@ from typing import Optional
 from google.cloud import storage, aiplatform, bigquery, secretmanager
 from vertexai.language_models import TextEmbeddingModel
 from genai_client import generate 
-import bq
 import gensim
 from gensim.utils import simple_preprocess
 import gensim.corpora as corpora
