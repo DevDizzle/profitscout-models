@@ -50,7 +50,7 @@ def backfill_with_rate_limiting():
     """
     Lists GCS files, filters out those already processed, and publishes
     messages for the remaining files at a controlled, throttled rate.
-    TEST MODE: Only processes 2 files to confirm updates work.
+    TEST MODE: Only processes 1 files to confirm updates work.
     """
     existing_records = get_existing_records()
 
@@ -82,8 +82,8 @@ def backfill_with_rate_limiting():
         return
 
     # ✅ Limit to 2 files only for testing
-    files_to_process = files_to_process[:2]
-    logging.warning("TEST MODE: Only publishing 2 messages to confirm updates work.")
+    files_to_process = files_to_process[:1]
+    logging.warning("TEST MODE: Only publishing 1 messages to confirm updates work.")
 
     publisher = pubsub_v1.PublisherClient()
     topic_path = publisher.topic_path(PROJECT_ID, PUB_SUB_TOPIC_ID)

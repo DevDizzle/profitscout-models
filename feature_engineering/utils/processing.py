@@ -1,12 +1,11 @@
 # ───────────────────────── imports ─────────────────────────
-import os, json, logging, re, requests, textwrap, time
+import os, json, logging, re, requests, textwrap, time, difflib
 import pandas as pd, pandas_ta as ta
 import numpy as np
 from numpy.linalg import norm
 from typing import Optional
 from google.cloud import storage, aiplatform, bigquery, secretmanager
 from vertexai.language_models import TextEmbeddingModel
-from genai_client import generate 
 import gensim
 from gensim.utils import simple_preprocess
 import gensim.corpora as corpora
@@ -16,18 +15,11 @@ import torch
 
 # ───────────────────────── init ────────────────────────────
 PROJECT_ID = os.environ.get("PROJECT_ID")
-if not PROJECT_ID:
-    logging.error("PROJECT_ID environment variable not set. Exiting.")
-    raise ValueError("PROJECT_ID environment variable not set.")
-
 aiplatform.init(project=PROJECT_ID, location="us-central1")
-try:
-    storage_client = storage.Client()
-    secret_client = secretmanager.SecretManagerServiceClient()
-    embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
-except Exception as e:
-    logging.error("Failed to initialize Google Cloud clients or embedding model: %s", e, exc_info=True)
-    raise
+bq_client = bigquery.Client()
+storage_client = storage.Client()
+secret_client = secretmanager.SecretManagerServiceClient()
+embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -54,29 +46,135 @@ def safe_cosine(u, v):
     return (num / den)[0]
 
 SECTION_PATTERNS = {
-    'key_financial_metrics': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Key Financial Metrics\b.*', re.I),
-    'key_discussion_points': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Key Discussion Points\b.*', re.I),
-    'sentiment_tone': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Sentiment Tone\b.*', re.I),
-    'short_term_outlook': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Short\-?Term Outlook\b.*', re.I),
-    'forward_looking_signals': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Forward\-?Looking Signals\b.*', re.I),
-    'qa_summary': re.compile(r'^\s*(?:#{1,6}\s*|\*\*)\s*Q&A Summary\b.*', re.I),
+    'key_financial_metrics': re.compile(r'^\s*(?:(?:#{1,6}\s*|\*\*)\s*)?Key Financial Metrics\b.*', re.I),
+    'key_discussion_points': re.compile(r'^\s*(?:(?:#{1,6}\s*|\*\*)\s*)?Key Discussion Points\b.*', re.I),
+    'sentiment_tone': re.compile(r'^\s*(?:(?:#{1,6}\s*|\*\*)\s*)?Sentiment Tone\b.*', re.I),
+    'short_term_outlook': re.compile(r'^\s*(?:(?:#{1,6}\s*|\*\*)\s*)?Short\-?Term Outlook\b.*', re.I),
+    'forward_looking_signals': re.compile(r'^\s*(?:(?:#{1,6}\s*|\*\*)\s*)?Forward\-?Looking Signals\b.*', re.I),
+    'qa_summary': re.compile(r'^\s*(?:(?:#{1,6}\s*|\*\*)\s*)?Q&A Summary\b.*', re.I),
 }
 
-def _parse_sections(md: str) -> dict:
-    """Return a dict of section_name → text."""
-    sections = {k: "" for k in SECTION_PATTERNS}
-    current = None
-    for line in md.splitlines():
-        hit = next((k for k, rx in SECTION_PATTERNS.items() if rx.match(line.strip())), None)
-        current = hit or current
-        if current and hit is None:
-            sections[current] += line + "\n"
+# For fuzzy fallback: Standard titles without extras
+STANDARD_TITLES = {
+    'key_financial_metrics': 'Key Financial Metrics',
+    'key_discussion_points': 'Key Discussion Points',
+    'sentiment_tone': 'Sentiment Tone',
+    'short_term_outlook': 'Short-Term Outlook',
+    'forward_looking_signals': 'Forward-Looking Signals',
+    'qa_summary': 'Q&A Summary',
+}
+
+def _parse_sections(text_content: str) -> dict:
+    # Normalize input: Strip, remove BOM, collapse multiple newlines
+    text_content = text_content.strip().lstrip('\ufeff')
+    text_content = re.sub(r'\n\s*\n', '\n\n', text_content)
     
-    logging.info("Parsed sections from summary markdown:")
+    sections = {k: "" for k in SECTION_PATTERNS}
+    matched_count = 0
+    
+    # --- Attempt Strict JSON Parse ---
+    try:
+        data = json.loads(text_content)
+        logging.info("JSON loaded successfully")
+        summary_data = next(iter(data.values()))
+        logging.info("Summary data keys: %s", list(summary_data.keys()))
+        
+        for section_key, text_value in summary_data.items():
+            clean_key = re.sub(r'[^a-zA-Z0-9\s\-&]', '', section_key.strip())
+            logging.info(f"Processing key: {section_key} (cleaned: {clean_key})")
+            matched_section = next(
+                (k for k, rx in SECTION_PATTERNS.items() if rx.search(clean_key)),
+                None
+            )
+            if matched_section:
+                sections[matched_section] = text_value.strip()
+                matched_count += 1
+            else:
+                logging.warning(f"No regex match for key: {section_key}")
+    
+    except (json.JSONDecodeError, StopIteration, AttributeError) as e:
+        logging.info(f"Strict JSON parse failed: {e}. Trying lenient JSON parse.")
+        
+        # --- Lenient JSON Parse (if looks like JSON but failed strict load) ---
+        if text_content.startswith('{') and text_content.endswith('}'):
+            try:
+                # Improved pattern: Matches "key": "value" with escaped inner content
+                pair_pattern = r'"([^"]+)":\s*"((?:\\.|[^"\\])*)"'
+                pairs = re.findall(pair_pattern, text_content)
+                
+                for section_key, text_value in pairs:
+                    clean_key = re.sub(r'[^a-zA-Z0-9\s\-&]', '', section_key.strip())
+                    logging.info(f"Lenient processing key: {section_key} (cleaned: {clean_key})")
+                    matched_section = next(
+                        (k for k, rx in SECTION_PATTERNS.items() if rx.search(clean_key)),
+                        None
+                    )
+                    if matched_section:
+                        # Manual unescape for common cases (e.g., \")
+                        text_value = text_value.replace('\\"', '"').replace('\\\\', '\\')
+                        sections[matched_section] = text_value.strip()
+                        matched_count += 1
+            except Exception as le:
+                logging.info(f"Lenient JSON parse failed: {le}. Falling back to Markdown.")
+        
+        # --- Markdown Regex Parsing ---
+        current_section = None
+        lines = text_content.splitlines()
+        for i, line in enumerate(lines):
+            clean_line = re.sub(r'[^a-zA-Z0-9\s\-&]', '', line.strip())
+            matched_section = next(
+                (k for k, rx in SECTION_PATTERNS.items() if rx.match(clean_line)),
+                None
+            )
+            if matched_section:
+                current_section = matched_section
+                matched_count += 1
+                # Improved: If value is on same line after :, append it
+                if ':' in line:
+                    value_start = line.find(':') + 1
+                    sections[current_section] += line[value_start:].strip() + "\n"
+            elif current_section:
+                sections[current_section] += line + "\n"
+    
+    # --- Fuzzy Matching Fallback if No Matches ---
+    if matched_count == 0:
+        logging.warning("No sections matched via regex. Attempting fuzzy matching.")
+        try:
+            data = json.loads(text_content)
+            summary_data = next(iter(data.values()))
+            for section_key, text_value in summary_data.items():
+                clean_key = re.sub(r'[^a-zA-Z0-9\s\-&]', '', section_key.strip().lower())
+                best_match = difflib.get_close_matches(clean_key, [t.lower() for t in STANDARD_TITLES.values()], n=1, cutoff=0.8)
+                if best_match:
+                    matched_section = next(k for k, v in STANDARD_TITLES.items() if v.lower() == best_match[0])
+                    sections[matched_section] = text_value.strip()
+                    matched_count += 1
+                    logging.info(f"Fuzzy matched {section_key} to {matched_section}")
+        except (json.JSONDecodeError, StopIteration, AttributeError):
+            # Fuzzy on lines for non-JSON
+            current_section = None
+            lines = text_content.splitlines()
+            for i, line in enumerate(lines):
+                clean_line = re.sub(r'[^a-zA-Z0-9\s\-&]', '', line.strip().lower())
+                best_match = difflib.get_close_matches(clean_line, [t.lower() for t in STANDARD_TITLES.values()], n=1, cutoff=0.8)
+                if best_match:
+                    matched_section = next(k for k, v in STANDARD_TITLES.items() if v.lower() == best_match[0])
+                    current_section = matched_section
+                    matched_count += 1
+                elif current_section:
+                    sections[current_section] += line + "\n"
+    
+    # Final cleanup and logging
+    for k in sections:
+        sections[k] = sections[k].strip()
+    
+    logging.info("Parsed Sections Breakdown:")
     for k, v in sections.items():
-        logging.info("  %-25s -> %4d chars", k, len(v.strip()))
-        sample = textwrap.shorten(v.strip().replace("\n", " "), width=120) or "(blank)"
-        logging.debug("    Sample: %s", sample)
+        logging.info("  %-25s -> %4d chars", k, len(sections[k]))
+    
+    if matched_count == 0:
+        logging.error("All sections empty after all attempts. Check summary format.")
+    
     return sections
 
 def get_embeddings(summary_gcs_path: str) -> dict:
@@ -84,10 +182,11 @@ def get_embeddings(summary_gcs_path: str) -> dict:
     failed_sections = []
     try:
         bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
-        text = storage_client.bucket(bucket).blob(blob).download_as_text()
-        logging.info("Downloaded summary: %d chars", len(text))
+        text = storage_client.bucket(bucket).blob(blob).download_as_bytes().decode('utf-8', errors='replace')
+        logging.info("Downloaded summary: %d chars, sample: %s", len(text), text[:500])
         
-        sections, results = _parse_sections(text), {}
+        sections = _parse_sections(text)
+        results = {}
 
         for sec, txt in sections.items():
             txt = (txt or "").strip()
@@ -138,35 +237,6 @@ def get_embeddings(summary_gcs_path: str) -> dict:
         logging.error("get_embeddings failed: %s", e, exc_info=True)
         return {}
 
-def _flash_score(summary_text: str) -> float:
-    prompt = (
-        "You are a sell-side equity analyst. Evaluate the MANAGEMENT sentiment in the "
-        "earnings-call summary below, taking into account:\n"
-        "  • Narrative language and confident / cautious phrasing\n"
-        "  • Direction and magnitude of the numeric results (revenue, EPS, margins, guidance)\n"
-        "  • Surprises vs. expectations (beats / misses) and any forward-looking statements\n\n"
-        "Convert your judgment into **one floating-point number** between −1.000 and 1.000, "
-        "inclusive, with **exactly three digits after the decimal point**. "
-        "Interpretation: −1.000 = strongly negative, 0.000 = neutral, 1.000 = strongly positive.\n"
-        "Valid formats: -0.732   0.000   0.415\n\n"
-        "⚠️  Output STRICTLY the number only – no words, symbols, or explanations.\n\n"
-        "### Earnings-Call Summary\n"
-        f"{summary_text}"
-    )
-    return float(generate(prompt))
-
-def get_sentiment_score(summary_gcs_path: str) -> dict:
-    try:
-        bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
-        text = storage_client.bucket(bucket).blob(blob).download_as_text()
-        if not text:
-            logging.warning("Empty summary at %s", summary_gcs_path)
-            return {"sentiment_score": None}
-        return {"sentiment_score": _flash_score(text)}
-    except Exception as e:
-        logging.error("get_sentiment_score: %s", e, exc_info=True)
-        return {"sentiment_score": None}
-
 def get_earnings_call_date(transcript_gcs_path: str) -> dict:
     """Reads the original transcript JSON *only* to pull the 'date' field."""
     try:
@@ -184,7 +254,7 @@ def get_stock_metadata(ticker: str) -> dict:
     try:
         table = os.getenv("METADATA_TABLE", "profitscout-lx6bb.profit_scout.stock_metadata")
         query = f"SELECT sector, industry FROM `{table}` WHERE ticker = @ticker LIMIT 1"
-        df = bq.bq_client.query(
+        df = bq_client.query(
             query,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[bigquery.ScalarQueryParameter("ticker", "STRING", ticker)]
@@ -198,7 +268,8 @@ def get_stock_metadata(ticker: str) -> dict:
 def get_eps_surprise(api_key: Optional[str], ticker: str) -> dict:
     if not api_key:
         return {"eps_surprise": None, "eps_missing": True}
-    url = (f"https://financialmodelingprep.com/api/v3/earnings-surprises/{ticker}?apikey={api_key}")
+    url = (f"https://financialmodelingprep.com/api/v3/"
+           f"earnings-surprises/{ticker}?apikey={api_key}")
     try:
         data = requests.get(url, timeout=10).json()
         if not data:
@@ -217,7 +288,7 @@ def get_price_technicals(ticker: str, call_date: str) -> dict:
         call_date = call_date.split(" ")[0]
         query = f"SELECT date, open, high, low, adj_close FROM `{price_table}` WHERE ticker = @ticker AND date <= @call_date ORDER BY date DESC LIMIT 100"
         df = (
-            bq.bq_client.query(
+            bq_client.query(
                 query,
                 job_config=bigquery.QueryJobConfig(
                     query_parameters=[
@@ -261,7 +332,7 @@ def get_max_close_30d(ticker: str, call_date: str) -> dict:
             return {"max_close_30d": None}
         price_table = os.environ["PRICE_TABLE"]
         max_q = f"SELECT MAX(adj_close) AS max_price FROM `{price_table}` WHERE ticker=@ticker AND date BETWEEN @start_date AND @end_date"
-        max_df = bq.bq_client.query(
+        max_df = bq_client.query(
             max_q,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
@@ -304,39 +375,83 @@ def get_lda_topics(summary_gcs_path: str) -> dict:
         return {f"lda_topic_{i}": None for i in range(10)}
 
 def get_finbert_sentiments(summary_gcs_path: str) -> dict:
+    """
+    Run FinBERT sentiment over each parsed section of the summary.
+    Returns dict like: {f"{section}_{cls}_prob": float} for cls in {pos, neg, neu}.
+    Falls back to neutral on any failure.
+    """
+    import logging
+    import torch
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    from google.cloud import storage
+
+    # Initialize defaults
     results = {f"{sec}_{sent}_prob": 0.0 for sec in SECTION_PATTERNS for sent in ['pos', 'neg', 'neu']}
+
     try:
-        bucket, blob = summary_gcs_path.removeprefix("gs://").split("/", 1)
-        text = storage_client.bucket(bucket).blob(blob).download_as_text()
+        # --- Load text from GCS ---
+        bucket_name, blob_name = summary_gcs_path.removeprefix("gs://").split("/", 1)
+        storage_client = storage.Client()
+        text = storage_client.bucket(bucket_name).blob(blob_name).download_as_text()
         sections = _parse_sections(text)
-        hf_token = os.getenv("HF_TOKEN")
-        if not hf_token:
-            logging.warning("HF_TOKEN not set. Using public model access for FinBERT.")
-        tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert", token=hf_token)
+
+        # --- Load FinBERT on CPU (no meta tricks) ---
+        tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
         model = AutoModelForSequenceClassification.from_pretrained(
-            "ProsusAI/finbert", token=hf_token, low_cpu_mem_usage=False, device_map=None
+            "ProsusAI/finbert",
+            torch_dtype=torch.float32,   # explicit, avoids half/meta weirdness
+            low_cpu_mem_usage=False      # ensure real weights are loaded
         )
-        logging.info(f"FinBERT model loaded on device: {next(model.parameters()).device}")
-        model.eval()
+        model.eval()  # stays on CPU by default
+
+        def score_text(t: str):
+            """Tokenize (chunk if needed) and return averaged probs."""
+            if not t.strip():
+                return [0.0, 0.0, 1.0]  # neutral
+
+            # Tokenize once to see length
+            enc = tokenizer(t, return_tensors="pt", truncation=True, max_length=512)
+            if enc["input_ids"].shape[1] <= 512:
+                with torch.no_grad():
+                    logits = model(**enc).logits
+                return torch.softmax(logits, dim=-1)[0].tolist()
+
+            # Chunk if longer than 512 tokens
+            tokens = tokenizer.encode(t, add_special_tokens=True)
+            chunk_size = 510  # keep room for [CLS] & [SEP]
+            probs_list = []
+
+            for i in range(0, len(tokens), chunk_size):
+                chunk_tokens = tokens[i:i + chunk_size]
+                # Re-add special tokens per chunk
+                chunk_tokens = tokenizer.build_inputs_with_special_tokens(chunk_tokens)
+                chunk_enc = {
+                    "input_ids": torch.tensor([chunk_tokens]),
+                    "attention_mask": torch.ones(1, len(chunk_tokens), dtype=torch.long),
+                }
+                with torch.no_grad():
+                    logits = model(**chunk_enc).logits
+                probs_list.append(torch.softmax(logits, dim=-1)[0])
+
+            mean_probs = torch.stack(probs_list, dim=0).mean(dim=0).tolist()
+            return mean_probs
+
         for sec, txt in sections.items():
-            txt = txt.strip()
-            if not txt:
-                results[f"{sec}_neu_prob"] = 1.0
-                continue
-            logging.info(f"Processing FinBERT for section {sec} with {len(txt)} chars")
-            inputs = tokenizer(txt, return_tensors="pt", truncation=True, padding=True, max_length=512)
-            inputs = {k: v.to('cpu') for k, v in inputs.items()}
-            with torch.no_grad():
-                outputs = model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1)[0].tolist()
-            logging.info(f"FinBERT probs for {sec}: {probs}")
+            logging.info(f"Processing FinBERT for section {sec} ({len(txt)} chars)")
+            probs = score_text(txt)
             results[f"{sec}_pos_prob"] = probs[0]
             results[f"{sec}_neg_prob"] = probs[1]
             results[f"{sec}_neu_prob"] = probs[2]
+
         return results
+
     except Exception as e:
         logging.error("get_finbert_sentiments failed: %s", e, exc_info=True)
-        return results
+        # Neutral fallback
+        return {
+            f"{sec}_{sent}_prob": 1.0 if sent == 'neu' else 0.0
+            for sec in SECTION_PATTERNS for sent in ['pos', 'neg', 'neu']
+        }
 
 def create_features(message: dict) -> dict | None:
     """Orchestrates feature creation and returns a complete row for BigQuery."""
@@ -350,9 +465,15 @@ def create_features(message: dict) -> dict | None:
 
     row.update(get_stock_metadata(ticker))
     row.update(get_embeddings(message.get("summary_gcs_path")))
-    row.update(get_sentiment_score(message["summary_gcs_path"]))
-    row.update(get_earnings_call_date(message["transcript_gcs_path"]))
+    row.update(get_earnings_call_date(message.get("transcript_gcs_path")))
     row.update(get_eps_surprise(get_fmp_api_key(), ticker))
+
+    # Compute sentiment_score from FinBERT results
+    finbert_results = get_finbert_sentiments(message["summary_gcs_path"])
+    pos_probs = [finbert_results[f"{sec}_pos_prob"] for sec in SECTION_PATTERNS]
+    valid_probs = [p for p in pos_probs if p > 0]  # Exclude neutral-only (1.0 neu)
+    row["sentiment_score"] = float(np.mean(valid_probs)) if valid_probs else 0.0
+    row.update(finbert_results)
 
     if row.get("earnings_call_date"):
         row["earnings_call_date"] = row["earnings_call_date"].split(" ")[0]
@@ -363,17 +484,20 @@ def create_features(message: dict) -> dict | None:
 
     # --- Engineered Features ---
     logging.info(f"Engineering features for {ticker}...")
+    
+    # Combined categorical feature
     sector = row.get("sector", "UNK_SEC") or "UNK_SEC"
     industry = row.get("industry", "UNK_IND") or "UNK_IND"
     row["industry_sector"] = f"{sector}_{industry}"
 
+    # Embedding stats and similarities
     EMB_COLS_NAMES = [
         "key_financial_metrics_embedding", "key_discussion_points_embedding",
         "sentiment_tone_embedding", "short_term_outlook_embedding",
         "forward_looking_signals_embedding", "qa_summary_embedding",
     ]
-    invalid_embeddings = []
     vecs = {c: np.array(row[c]) if row.get(c) is not None else np.array([]) for c in EMB_COLS_NAMES}
+    
     for col_name, vec in vecs.items():
         base_name = col_name.replace("_embedding", "")
         if col_name == "forward_looking_signals_embedding":
@@ -381,7 +505,6 @@ def create_features(message: dict) -> dict | None:
         try:
             if vec.size != 768 or not np.all(np.isfinite(vec)):
                 logging.warning(f"Invalid embedding for {col_name}: size={vec.size}. Setting stats to 0.0 (investigate API issue).")
-                invalid_embeddings.append(col_name)
                 row[f"{base_name}_norm"] = 0.0
                 row[f"{base_name}_mean"] = 0.0
                 row[f"{base_name}_std"] = 0.0
@@ -391,13 +514,9 @@ def create_features(message: dict) -> dict | None:
                 row[f"{base_name}_std"] = float(vec.std())
         except Exception as e:
             logging.error(f"Error computing stats for {col_name}: {e}")
-            invalid_embeddings.append(col_name)
             row[f"{base_name}_norm"] = 0.0
             row[f"{base_name}_mean"] = 0.0
             row[f"{base_name}_std"] = 0.0
-
-    if invalid_embeddings:
-        logging.error("Invalid embeddings detected: %s", invalid_embeddings)
 
     sim_pairs = [
         ("cos_fin_disc", "key_financial_metrics_embedding", "key_discussion_points_embedding"),
@@ -408,8 +527,10 @@ def create_features(message: dict) -> dict | None:
     for key, col1, col2 in sim_pairs:
         row[key] = float(safe_cosine(vecs.get(col1, []), vecs.get(col2, [])))
 
+    # Null indicator for EPS
     row["eps_surprise_isnull"] = 1 if row.get("eps_surprise") is None else 0
 
+    # Price and technical ratios
     if row.get("adj_close_on_call_date") and row.get("sma_20") and row.get("sma_20") != 0:
         row["price_sma20_ratio"] = float(row["adj_close_on_call_date"] / row["sma_20"])
     if row.get("ema_50") and row.get("sma_20") and row.get("sma_20") != 0:
@@ -422,9 +543,9 @@ def create_features(message: dict) -> dict | None:
         row["adx_log1p"] = float(np.log1p(row["adx_14"]))
 
     row.update(get_lda_topics(message["summary_gcs_path"]))
-    row.update(get_finbert_sentiments(message["summary_gcs_path"]))
 
     if not {"earnings_call_date", "sentiment_score"}.issubset(row):
         logging.error(f"Failed to generate critical features for {ticker}. Aborting row.")
         return None
+        
     return row

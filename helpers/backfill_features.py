@@ -14,10 +14,10 @@ GCS_PREFIX = "earnings-call-summaries/"
 PUB_SUB_TOPIC_ID = "process-earnings-call"
 
 # --- BigQuery Configuration for checking existing features ---
-BQ_FEATURE_TABLE_ID = "profitscout-lx6bb.profit_scout.staging_breakout_features"
+BQ_FEATURE_TABLE_ID = "profitscout-lx6bb.profit_scout.breakout_features"
 
 # --- Control how many messages are published per second ---
-PUBLISH_RATE_PER_SECOND = 2
+PUBLISH_RATE_PER_SECOND = 1
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
