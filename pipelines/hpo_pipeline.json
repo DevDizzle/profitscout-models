@@ -316,7 +316,7 @@
                         "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
                       },
                       "machine_spec": {
-                        "machine_type": "n1-standard-8"
+                        "machine_type": "n1-highmem-8"
                       },
                       "replica_count": 1.0
                     }

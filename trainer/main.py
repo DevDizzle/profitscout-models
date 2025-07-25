@@ -167,7 +167,9 @@ def preprocess_data(df: pd.DataFrame, params: dict):
         pca = PCA(n_components=pca_n, random_state=params["random_state"])
         pca.fit(stacked_train)
         evr_sum = pca.explained_variance_ratio_.sum()
-        logging.info(f"PCA for {col}: {pca_n} components, explained variance ratio sum = {evr_sum:.2f}")
+        logging.info(f"PCA for {col}: {pca.n_components_} components, explained variance ratio sum = {evr_sum:.2f}")
+        if evr_sum < 0.8:
+            logging.warning(f"Low explained variance ({evr_sum:.2f}) for {col} – consider more components or better features")
         if pca.n_components_ < pca_n:
             logging.warning(f"PCA for {col} reduced to {pca.n_components_} components (low rank/samples)")
 
@@ -194,10 +196,17 @@ def preprocess_data(df: pd.DataFrame, params: dict):
     feature_names = pca_cols + final_num_cols
     logging.info(f"Feature matrix shape: {X_all.shape}, Train/Holdout: {len(train_idx)}/{len(holdout_idx)}")
     logging.info(f"Train breakout rate: {y_all[train_idx].mean():.2%}, Holdout: {y_all[holdout_idx].mean():.2%}")
-    return X_all, y_all, train_idx, holdout_idx, feature_names, pca_map
+
+    imputer = SimpleImputer(strategy="constant", fill_value=0)
+    imputer.fit(X_all[train_idx])
+    X_all = imputer.transform(X_all)
+    if np.isnan(X_all).any():
+        logging.warning("NaNs remain after imputation – check for all-NaN columns in features")
+
+    return X_all, y_all, train_idx, holdout_idx, feature_names, pca_map, imputer
 
 
-def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, params):
+def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, params, imputer):
     """Train XGBoost + LogReg ensemble and compute holdout PR-AUC."""
     try:
         # Split train into sub-train and validation for XGBoost early stopping
@@ -212,12 +221,11 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
 
         blend_weight = params.get("blend_weight", 0.5)
 
-        # impute + scale for LogReg (fit on full train)
-        imputer = SimpleImputer(strategy="median").fit(X_tr)
-        scaler = StandardScaler().fit(imputer.transform(X_tr))
+        # Scale for LogReg (fit on full train; no need for imputer now)
+        scaler = StandardScaler().fit(X_tr)
 
-        X_tr_scaled = scaler.transform(imputer.transform(X_tr))
-        X_hd_scaled = scaler.transform(imputer.transform(X_hd))
+        X_tr_scaled = scaler.transform(X_tr)
+        X_hd_scaled = scaler.transform(X_hd)
 
         # Apply SMOTE if enabled for XGBoost sub-train
         if params["use_smote"]:
@@ -250,7 +258,7 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
             dsubtr,
             num_boost_round=3000,
             evals=[(dval, "val")],
-            early_stopping_rounds=150,
+            early_stopping_rounds=params["early_stopping_rounds"],
             verbose_eval=False,
         )
 
@@ -290,7 +298,7 @@ def train_and_evaluate(X_all, y_all, train_idx, holdout_idx, feature_names, para
             scaler=scaler,
             logreg=logreg,
             calibrator=calibrator,
-            threshold=0.5,
+            threshold=params["thresh_req_recall"],  # Updated to use param (e.g., for post-processing thresholds if needed)
         )
         return bst, metrics, artifacts
     except Exception as e:
@@ -334,33 +342,21 @@ def main():
     parser.add_argument("--run-name",
                         default=f"run-{pd.Timestamp.now():%Y%m%d-%H%M%S}")
 
-    # hyper-parameters – hyphen + underscore forms
-    parser.add_argument("--pca-n",                  dest="pca_n", type=int,   default=128)
-    parser.add_argument("--pca_n",                  dest="pca_n", type=int,   default=argparse.SUPPRESS)
-    parser.add_argument("--xgb-max-depth",          dest="xgb_max_depth", type=int, default=5)
-    parser.add_argument("--xgb_max_depth",          dest="xgb_max_depth", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--xgb-min-child-weight",   dest="xgb_min_child_weight", type=int, default=2)
-    parser.add_argument("--xgb_min_child_weight",   dest="xgb_min_child_weight", type=int, default=argparse.SUPPRESS)
-    parser.add_argument("--xgb-subsample",          dest="xgb_subsample", type=float, default=0.9)
-    parser.add_argument("--xgb_subsample",          dest="xgb_subsample", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--logreg-c",               dest="logreg_c", type=float, default=0.1)
-    parser.add_argument("--logreg_c",               dest="logreg_c", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--blend-weight",           dest="blend_weight", type=float, default=0.6)
-    parser.add_argument("--blend_weight",           dest="blend_weight", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--learning-rate",          dest="learning_rate", type=float, default=0.02)
-    parser.add_argument("--learning_rate",          dest="learning_rate", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--gamma",                  dest="gamma", type=float, default=0.1)
-    parser.add_argument("--colsample-bytree",       dest="colsample_bytree", type=float, default=0.9)
-    parser.add_argument("--colsample_bytree",       dest="colsample_bytree", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--scale-pos-weight",       dest="scale_pos_weight", type=float, default=1.0)
-    parser.add_argument("--scale_pos_weight",       dest="scale_pos_weight", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--alpha",                  dest="alpha", type=float, default=0.0)
-    parser.add_argument("--reg-lambda",             dest="reg_lambda", type=float, default=1.0)
-    parser.add_argument("--reg_lambda",             dest="reg_lambda", type=float, default=argparse.SUPPRESS)
-    # Add both hyphen and underscore for use_smote
-    parser.add_argument("--use-smote",              dest="use_smote", type=str, default="false")
-    parser.add_argument("--use_smote",              dest="use_smote", type=str, default=argparse.SUPPRESS)
-    parser.add_argument("--feature-selection",      dest="feature_selection", action="store_true")
+    # hyper-parameters – consolidated aliases
+    parser.add_argument(("--pca-n", "--pca_n"), dest="pca_n", type=int, default=128)
+    parser.add_argument(("--xgb-max-depth", "--xgb_max_depth"), dest="xgb_max_depth", type=int, default=5)
+    parser.add_argument(("--xgb-min-child-weight", "--xgb_min_child_weight"), dest="xgb_min_child_weight", type=int, default=2)
+    parser.add_argument(("--xgb-subsample", "--xgb_subsample"), dest="xgb_subsample", type=float, default=0.9)
+    parser.add_argument(("--logreg-c", "--logreg_c"), dest="logreg_c", type=float, default=0.1)
+    parser.add_argument(("--blend-weight", "--blend_weight"), dest="blend_weight", type=float, default=0.6)
+    parser.add_argument(("--learning-rate", "--learning_rate"), dest="learning_rate", type=float, default=0.02)
+    parser.add_argument("--gamma", type=float, default=0.1)
+    parser.add_argument(("--colsample-bytree", "--colsample_bytree"), dest="colsample_bytree", type=float, default=0.9)
+    parser.add_argument(("--scale-pos-weight", "--scale_pos_weight"), dest="scale_pos_weight", type=float, default=1.0)
+    parser.add_argument("--alpha", type=float, default=0.0)
+    parser.add_argument(("--reg-lambda", "--reg_lambda"), dest="reg_lambda", type=float, default=1.0)
+    parser.add_argument(("--use-smote", "--use_smote"), dest="use_smote", type=str, default="false")
+    # TODO: Add --feature-selection flag/logic post-HPO for final model refinement
 
     args = parser.parse_args()
 
@@ -383,7 +379,6 @@ def main():
         alpha=args.alpha,
         reg_lambda=args.reg_lambda,
         use_smote=(args.use_smote.lower() == 'true'),
-        feature_selection=args.feature_selection,
     )
 
     # ── optional experiment tracking ─────────────────────────────
@@ -403,9 +398,9 @@ def main():
 
     try:
         df = load_data(args.project_id, args.source_table, params["breakout_threshold"])
-        X_all, y_all, train_idx, holdout_idx, f_names, pca_map = preprocess_data(df, params)
+        X_all, y_all, train_idx, holdout_idx, f_names, pca_map, imputer = preprocess_data(df, params)
         bst, metrics, artifacts = train_and_evaluate(
-            X_all, y_all, train_idx, holdout_idx, f_names, params
+            X_all, y_all, train_idx, holdout_idx, f_names, params, imputer
         )
 
         # Always log PR-AUC for visibility
