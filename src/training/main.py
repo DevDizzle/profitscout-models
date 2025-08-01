@@ -380,6 +380,13 @@ def train_and_evaluate(
 
 
 def save_artifacts(bst, artifacts, pca_map, model_dir: str):
+    """
+    Persist model + preprocessing artefacts to GCS.
+
+    * Saves the Booster in **text JSON** (guaranteed UTF-8) even on XGBoost ≥ 2.1
+      by passing format="json".
+    * File is now clearly named xgb_model.json.
+    """
     if not model_dir.startswith("gs://"):
         logging.error("AIP_MODEL_DIR must be on GCS (got %s)", model_dir)
         return
@@ -388,19 +395,19 @@ def save_artifacts(bst, artifacts, pca_map, model_dir: str):
                           urllib.parse.urlparse(model_dir).path.lstrip("/")
 
     with tempfile.TemporaryDirectory() as tmp:
-        # 1️⃣  XGBoost model (JSON)
-        bst.save_model(os.path.join(tmp, "xgb_model.json"))   # <‑‑ native format
-        # 2️⃣  Pre‑processing artefacts
+        # 1️⃣  Booster – force JSON *text* format
+        bst.save_model(os.path.join(tmp, "xgb_model.json"))
+        # 2️⃣  Pre-processing artefacts
         joblib.dump(artifacts, os.path.join(tmp, "training_artifacts.joblib"))
         joblib.dump(pca_map,  os.path.join(tmp, "pca_map.joblib"))
 
         client  = storage.Client()
         bucket  = client.bucket(bucket_name)
-
         for fname in os.listdir(tmp):
             blob = bucket.blob(os.path.join(prefix, fname))
             blob.upload_from_filename(os.path.join(tmp, fname))
             logging.info("Uploaded %s to gs://%s/%s", fname, bucket_name, blob.name)
+
 
 
 def main() -> None:

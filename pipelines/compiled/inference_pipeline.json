@@ -252,18 +252,6 @@
           },
           "inputs": {
             "parameters": {
-              "job_configuration_query": {
-                "runtimeValue": {
-                  "constant": {
-                    "destinationTable": {
-                      "datasetId": "profit_scout",
-                      "projectId": "{{$.inputs.parameters['pipelinechannel--project']}}",
-                      "tableId": "prediction_input"
-                    },
-                    "writeDisposition": "WRITE_TRUNCATE"
-                  }
-                }
-              },
               "location": {
                 "componentInputParameter": "location"
               },
@@ -275,7 +263,7 @@
               },
               "query": {
                 "runtimeValue": {
-                  "constant": "\n          SELECT *\n          FROM `{{$.inputs.parameters['pipelinechannel--project']}}.profit_scout.breakout_features`\n          -- TODO: replace this filter\n          WHERE ticker = 'AAPL'\n        "
+                  "constant": "\n          CREATE OR REPLACE TABLE `profitscout-lx6bb.profit_scout.prediction_input` AS\n          SELECT *\n          FROM   `{{$.inputs.parameters['pipelinechannel--project']}}.profit_scout.breakout_features`\n          WHERE  max_close_30d IS NULL\n        "
                 }
               }
             }
@@ -304,8 +292,23 @@
               "location": {
                 "componentInputParameter": "location"
               },
+              "pipelinechannel--auto_prune": {
+                "componentInputParameter": "auto_prune"
+              },
+              "pipelinechannel--metric_tol": {
+                "componentInputParameter": "metric_tol"
+              },
+              "pipelinechannel--model_version_dir": {
+                "componentInputParameter": "model_version_dir"
+              },
               "pipelinechannel--project": {
                 "componentInputParameter": "project"
+              },
+              "pipelinechannel--prune_step": {
+                "componentInputParameter": "prune_step"
+              },
+              "pipelinechannel--top_k_features": {
+                "componentInputParameter": "top_k_features"
               },
               "project": {
                 "componentInputParameter": "project"
@@ -316,10 +319,22 @@
                     {
                       "container_spec": {
                         "args": [
-                          "--project-id={{channel:task=;name=project;type=String;}}",
-                          "--source-table=profitscout-lx6bb.profit_scout.prediction_input",
-                          "--destination-table=profitscout-lx6bb.profit_scout.predictions",
-                          "--model-dir=gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts"
+                          "--project-id",
+                          "{{$.inputs.parameters['pipelinechannel--project']}}",
+                          "--source-table",
+                          "profit_scout.prediction_input",
+                          "--destination-table",
+                          "profitscout-lx6bb.profit_scout.predictions",
+                          "--model-dir",
+                          "{{$.inputs.parameters['pipelinechannel--model_version_dir']}}",
+                          "--top-k-features",
+                          "{{$.inputs.parameters['pipelinechannel--top_k_features']}}",
+                          "--auto-prune",
+                          "{{$.inputs.parameters['pipelinechannel--auto_prune']}}",
+                          "--metric-tol",
+                          "{{$.inputs.parameters['pipelinechannel--metric_tol']}}",
+                          "--prune-step",
+                          "{{$.inputs.parameters['pipelinechannel--prune_step']}}"
                         ],
                         "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/predictor:latest"
                       },
@@ -341,8 +356,23 @@
     },
     "inputDefinitions": {
       "parameters": {
+        "auto_prune": {
+          "defaultValue": "false",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
         "location": {
           "defaultValue": "us-central1",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "metric_tol": {
+          "defaultValue": 0.002,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "model_version_dir": {
+          "defaultValue": "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts",
           "isOptional": true,
           "parameterType": "STRING"
         },
@@ -350,6 +380,16 @@
           "defaultValue": "profitscout-lx6bb",
           "isOptional": true,
           "parameterType": "STRING"
+        },
+        "prune_step": {
+          "defaultValue": 25.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "top_k_features": {
+          "defaultValue": 0.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
         }
       }
     }

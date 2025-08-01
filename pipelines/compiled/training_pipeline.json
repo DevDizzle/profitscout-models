@@ -1,0 +1,430 @@
+{
+  "components": {
+    "comp-training-task": {
+      "executorLabel": "exec-training-task",
+      "inputDefinitions": {
+        "parameters": {
+          "alpha": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "auto_prune": {
+            "parameterType": "STRING"
+          },
+          "base_output_directory": {
+            "defaultValue": "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "blend_weight": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "colsample_bytree": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "display_name": {
+            "defaultValue": "profitscout-training-job",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "enable_web_access": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "encryption_spec_key_name": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "focal_gamma": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "gamma": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "labels": {
+            "defaultValue": {},
+            "isOptional": true,
+            "parameterType": "STRUCT"
+          },
+          "learning_rate": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "location": {
+            "defaultValue": "{{$.pipeline_google_cloud_location}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "logreg_c": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "max_wait_duration": {
+            "defaultValue": "86400s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "metric_tol": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "network": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "pca_n": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "persistent_resource_id": {
+            "defaultValue": "{{$.pipeline_persistent_resource_id}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "project": {
+            "parameterType": "STRING"
+          },
+          "prune_step": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "reg_lambda": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "reserved_ip_ranges": {
+            "defaultValue": [],
+            "isOptional": true,
+            "parameterType": "LIST"
+          },
+          "restart_job_on_worker_restart": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "service_account": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "source_table": {
+            "parameterType": "STRING"
+          },
+          "strategy": {
+            "defaultValue": "STANDARD",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "tensorboard": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "timeout": {
+            "defaultValue": "604800s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "top_k_features": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "use_full_data": {
+            "parameterType": "STRING"
+          },
+          "worker_pool_specs": {
+            "defaultValue": [
+              {
+                "container_spec": {
+                  "args": [
+                    "--project-id",
+                    "{{$.inputs.parameters['project']}}",
+                    "--source-table",
+                    "{{$.inputs.parameters['source_table']}}",
+                    "--pca-n",
+                    "{{$.inputs.parameters['pca_n']}}",
+                    "--xgb-max-depth",
+                    "{{$.inputs.parameters['xgb_max_depth']}}",
+                    "--xgb-min-child-weight",
+                    "{{$.inputs.parameters['xgb_min_child_weight']}}",
+                    "--xgb-subsample",
+                    "{{$.inputs.parameters['xgb_subsample']}}",
+                    "--logreg-c",
+                    "{{$.inputs.parameters['logreg_c']}}",
+                    "--blend-weight",
+                    "{{$.inputs.parameters['blend_weight']}}",
+                    "--learning-rate",
+                    "{{$.inputs.parameters['learning_rate']}}",
+                    "--gamma",
+                    "{{$.inputs.parameters['gamma']}}",
+                    "--colsample-bytree",
+                    "{{$.inputs.parameters['colsample_bytree']}}",
+                    "--alpha",
+                    "{{$.inputs.parameters['alpha']}}",
+                    "--reg-lambda",
+                    "{{$.inputs.parameters['reg_lambda']}}",
+                    "--focal-gamma",
+                    "{{$.inputs.parameters['focal_gamma']}}",
+                    "--top-k-features",
+                    "{{$.inputs.parameters['top_k_features']}}",
+                    "--auto-prune",
+                    "{{$.inputs.parameters['auto_prune']}}",
+                    "--metric-tol",
+                    "{{$.inputs.parameters['metric_tol']}}",
+                    "--prune-step",
+                    "{{$.inputs.parameters['prune_step']}}",
+                    "--use-full-data",
+                    "{{$.inputs.parameters['use_full_data']}}"
+                  ],
+                  "command": [
+                    "python3",
+                    "main.py"
+                  ],
+                  "env": [],
+                  "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
+                },
+                "disk_spec": {
+                  "boot_disk_size_gb": 100.0,
+                  "boot_disk_type": "pd-ssd"
+                },
+                "machine_spec": {
+                  "machine_type": "n1-standard-16"
+                },
+                "replica_count": 1.0
+              }
+            ],
+            "isOptional": true,
+            "parameterType": "LIST"
+          },
+          "xgb_max_depth": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "xgb_min_child_weight": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "xgb_subsample": {
+            "parameterType": "NUMBER_DOUBLE"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "gcp_resources": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    }
+  },
+  "defaultPipelineRoot": "gs://profitscout-lx6bb-pipeline-artifacts/training",
+  "deploymentSpec": {
+    "executors": {
+      "exec-training-task": {
+        "container": {
+          "args": [
+            "--type",
+            "CustomJob",
+            "--payload",
+            "{\"display_name\": \"{{$.inputs.parameters['display_name']}}\", \"job_spec\": {\"worker_pool_specs\": {{$.inputs.parameters['worker_pool_specs']}}, \"scheduling\": {\"timeout\": \"{{$.inputs.parameters['timeout']}}\", \"restart_job_on_worker_restart\": {{$.inputs.parameters['restart_job_on_worker_restart']}}, \"strategy\": \"{{$.inputs.parameters['strategy']}}\", \"max_wait_duration\": \"{{$.inputs.parameters['max_wait_duration']}}\"}, \"service_account\": \"{{$.inputs.parameters['service_account']}}\", \"tensorboard\": \"{{$.inputs.parameters['tensorboard']}}\", \"enable_web_access\": {{$.inputs.parameters['enable_web_access']}}, \"network\": \"{{$.inputs.parameters['network']}}\", \"reserved_ip_ranges\": {{$.inputs.parameters['reserved_ip_ranges']}}, \"base_output_directory\": {\"output_uri_prefix\": \"{{$.inputs.parameters['base_output_directory']}}\"}, \"persistent_resource_id\": \"{{$.inputs.parameters['persistent_resource_id']}}\"}, \"labels\": {{$.inputs.parameters['labels']}}, \"encryption_spec\": {\"kms_key_name\": \"{{$.inputs.parameters['encryption_spec_key_name']}}\"}}",
+            "--project",
+            "{{$.inputs.parameters['project']}}",
+            "--location",
+            "{{$.inputs.parameters['location']}}",
+            "--gcp_resources",
+            "{{$.outputs.parameters['gcp_resources'].output_file}}"
+          ],
+          "command": [
+            "python3",
+            "-u",
+            "-m",
+            "google_cloud_pipeline_components.container.v1.custom_job.launcher"
+          ],
+          "image": "gcr.io/ml-pipeline/google-cloud-pipeline-components:2.20.1"
+        }
+      }
+    }
+  },
+  "pipelineInfo": {
+    "description": "Train and save ProfitScout model artifacts with HPO\u2011selected hyperparameters and optional feature selection.",
+    "name": "profitscout-standard-training-pipeline"
+  },
+  "root": {
+    "dag": {
+      "tasks": {
+        "training-task": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-training-task"
+          },
+          "inputs": {
+            "parameters": {
+              "alpha": {
+                "componentInputParameter": "alpha"
+              },
+              "auto_prune": {
+                "componentInputParameter": "auto_prune"
+              },
+              "blend_weight": {
+                "componentInputParameter": "blend_weight"
+              },
+              "colsample_bytree": {
+                "componentInputParameter": "colsample_bytree"
+              },
+              "focal_gamma": {
+                "componentInputParameter": "focal_gamma"
+              },
+              "gamma": {
+                "componentInputParameter": "gamma"
+              },
+              "learning_rate": {
+                "componentInputParameter": "learning_rate"
+              },
+              "logreg_c": {
+                "componentInputParameter": "logreg_c"
+              },
+              "metric_tol": {
+                "componentInputParameter": "metric_tol"
+              },
+              "pca_n": {
+                "componentInputParameter": "pca_n"
+              },
+              "project": {
+                "componentInputParameter": "project"
+              },
+              "prune_step": {
+                "componentInputParameter": "prune_step"
+              },
+              "reg_lambda": {
+                "componentInputParameter": "reg_lambda"
+              },
+              "source_table": {
+                "componentInputParameter": "source_table"
+              },
+              "top_k_features": {
+                "componentInputParameter": "top_k_features"
+              },
+              "use_full_data": {
+                "componentInputParameter": "use_full_data"
+              },
+              "xgb_max_depth": {
+                "componentInputParameter": "xgb_max_depth"
+              },
+              "xgb_min_child_weight": {
+                "componentInputParameter": "xgb_min_child_weight"
+              },
+              "xgb_subsample": {
+                "componentInputParameter": "xgb_subsample"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "training-task"
+          }
+        }
+      }
+    },
+    "inputDefinitions": {
+      "parameters": {
+        "alpha": {
+          "defaultValue": 1e-05,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "auto_prune": {
+          "defaultValue": "false",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "blend_weight": {
+          "defaultValue": 0.6,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "colsample_bytree": {
+          "defaultValue": 0.9,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "focal_gamma": {
+          "defaultValue": 2.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "gamma": {
+          "defaultValue": 0.1,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "learning_rate": {
+          "defaultValue": 0.02,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "location": {
+          "defaultValue": "us-central1",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "logreg_c": {
+          "defaultValue": 0.001,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "metric_tol": {
+          "defaultValue": 0.002,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "pca_n": {
+          "defaultValue": 128.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "project": {
+          "defaultValue": "profitscout-lx6bb",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "prune_step": {
+          "defaultValue": 25.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "reg_lambda": {
+          "defaultValue": 2e-05,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "source_table": {
+          "defaultValue": "profit_scout.breakout_features",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "top_k_features": {
+          "defaultValue": 0.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "use_full_data": {
+          "defaultValue": "true",
+          "isOptional": true,
+          "parameterType": "STRING"
+        },
+        "xgb_max_depth": {
+          "defaultValue": 7.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "xgb_min_child_weight": {
+          "defaultValue": 2.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "xgb_subsample": {
+          "defaultValue": 0.9,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        }
+      }
+    }
+  },
+  "schemaVersion": "2.1.0",
+  "sdkVersion": "kfp-2.13.0"
+}

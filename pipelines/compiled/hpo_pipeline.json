@@ -121,7 +121,7 @@
     }
   },
   "pipelineInfo": {
-    "description": "Final HPO round with 50 trials, focused on top hyps + smote.",
+    "description": "Final tight HPO sweep (focal loss, no SMOTE).",
     "name": "profitscout-hpo-pipeline"
   },
   "root": {
@@ -181,9 +181,9 @@
                       "conditional_parameter_specs": [],
                       "discrete_value_spec": {
                         "values": [
+                          112.0,
                           128.0,
-                          192.0,
-                          256.0
+                          144.0
                         ]
                       },
                       "parameter_id": "pca_n",
@@ -193,7 +193,7 @@
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
                         "max_value": "7",
-                        "min_value": "5"
+                        "min_value": "6"
                       },
                       "parameter_id": "xgb_max_depth",
                       "scale_type": 1.0
@@ -210,8 +210,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.95,
-                        "min_value": 0.85
+                        "max_value": 0.92,
+                        "min_value": 0.88
                       },
                       "parameter_id": "xgb_subsample",
                       "scale_type": 1.0
@@ -219,8 +219,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.12,
-                        "min_value": 0.08
+                        "max_value": 0.011,
+                        "min_value": 0.009
                       },
                       "parameter_id": "logreg_c",
                       "scale_type": 2.0
@@ -228,8 +228,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.65,
-                        "min_value": 0.55
+                        "max_value": 0.62,
+                        "min_value": 0.58
                       },
                       "parameter_id": "blend_weight",
                       "scale_type": 1.0
@@ -237,8 +237,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.025,
-                        "min_value": 0.015
+                        "max_value": 0.024,
+                        "min_value": 0.018
                       },
                       "parameter_id": "learning_rate",
                       "scale_type": 2.0
@@ -246,8 +246,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.15,
-                        "min_value": 0.05
+                        "max_value": 0.12,
+                        "min_value": 0.08
                       },
                       "parameter_id": "gamma",
                       "scale_type": 1.0
@@ -255,8 +255,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.95,
-                        "min_value": 0.85
+                        "max_value": 0.94,
+                        "min_value": 0.88
                       },
                       "parameter_id": "colsample_bytree",
                       "scale_type": 1.0
@@ -264,17 +264,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 15.0,
-                        "min_value": 5.0
-                      },
-                      "parameter_id": "scale_pos_weight",
-                      "scale_type": 2.0
-                    },
-                    {
-                      "conditional_parameter_specs": [],
-                      "double_value_spec": {
-                        "max_value": 0.05,
-                        "min_value": 1e-05
+                        "max_value": 0.0003,
+                        "min_value": 3e-05
                       },
                       "parameter_id": "alpha",
                       "scale_type": 2.0
@@ -282,22 +273,20 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.05,
-                        "min_value": 1e-05
+                        "max_value": 0.0003,
+                        "min_value": 3e-05
                       },
                       "parameter_id": "reg_lambda",
                       "scale_type": 2.0
                     },
                     {
-                      "categorical_value_spec": {
-                        "values": [
-                          "true",
-                          "false"
-                        ]
-                      },
                       "conditional_parameter_specs": [],
-                      "parameter_id": "use_smote",
-                      "scale_type": 0.0
+                      "double_value_spec": {
+                        "max_value": 2.2,
+                        "min_value": 1.8
+                      },
+                      "parameter_id": "focal_gamma",
+                      "scale_type": 1.0
                     }
                   ]
                 }
@@ -339,7 +328,7 @@
           "parameterType": "STRING"
         },
         "max_trial_count": {
-          "defaultValue": 50.0,
+          "defaultValue": 30.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },

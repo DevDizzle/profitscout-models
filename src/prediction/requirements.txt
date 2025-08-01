@@ -2,6 +2,6 @@ google-cloud-bigquery
 google-cloud-storage
 pandas
 scikit-learn
-xgboost
+xgboost==1.6.2
 joblib
 gcsfs

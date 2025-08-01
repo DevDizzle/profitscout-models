@@ -5,7 +5,7 @@ import json
 import base64
 import logging
 from flask import Flask, request
-from utils import processing
+import processing  # Corrected import
 from google.cloud import pubsub_v1
 
 # --- Environment Variables ---
@@ -31,11 +31,11 @@ def process_pubsub_message():
         return 'Bad Request: invalid Pub/Sub message format', 400
 
     message = envelope['message']
-    
+
     try:
         data_str = base64.b64decode(message['data']).decode('utf-8')
         data = json.loads(data_str)
-        
+
         logging.info(f"Processing features for ticker: {data.get('ticker')}")
 
         final_row = processing.create_features(message=data)
@@ -56,5 +56,5 @@ def process_pubsub_message():
         return 'Internal Server Error', 500
 
 if __name__ == '__main__':
-    PORT = int(os.environ.get('PORT', 8080))    
+    PORT = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=PORT, debug=True)
