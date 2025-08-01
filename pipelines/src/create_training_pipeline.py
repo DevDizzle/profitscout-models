@@ -1,8 +1,12 @@
+#!/usr/bin/env python3
 # FILE: training_pipeline.py
+
 from kfp import dsl, compiler
 from google_cloud_pipeline_components.v1.custom_job import (
     create_custom_training_job_from_component,
 )
+import subprocess
+import os
 
 # ─────────────────── Config ───────────────────
 PROJECT_ID = "profitscout-lx6bb"
@@ -16,10 +20,8 @@ MODEL_ARTIFACT_DIR = f"{PIPELINE_ROOT}/model-artifacts"
 # ───────────────── Component ─────────────────
 @dsl.container_component
 def training_task(
-    # core params
     project: str,
     source_table: str,
-    # hyper‑params
     pca_n: int,
     xgb_max_depth: int,
     xgb_min_child_weight: int,
@@ -32,12 +34,11 @@ def training_task(
     alpha: float,
     reg_lambda: float,
     focal_gamma: float,
-    # NEW feature‑selection flags
     top_k_features: int,
-    auto_prune: str,       # "true"/"false" for pipeline UI toggle
+    auto_prune: str,
     metric_tol: float,
     prune_step: int,
-    use_full_data: str,    # "true"/"false"
+    use_full_data: str,
 ) -> dsl.ContainerSpec:
     return dsl.ContainerSpec(
         image=TRAINER_IMAGE_URI,
@@ -45,8 +46,6 @@ def training_task(
         args=[
             "--project-id", project,
             "--source-table", source_table,
-
-            # hyper‑params
             "--pca-n", pca_n,
             "--xgb-max-depth", xgb_max_depth,
             "--xgb-min-child-weight", xgb_min_child_weight,
@@ -59,8 +58,6 @@ def training_task(
             "--alpha", alpha,
             "--reg-lambda", reg_lambda,
             "--focal-gamma", focal_gamma,
-
-            # feature‑selection flags (always present, value is "true"/"false")
             "--top-k-features", top_k_features,
             "--auto-prune", auto_prune,
             "--metric-tol", metric_tol,
@@ -87,7 +84,6 @@ def training_pipeline(
     project: str = PROJECT_ID,
     location: str = REGION,
     source_table: str = "profit_scout.breakout_features",
-    # hyper‑param defaults (unchanged)
     pca_n: int = 128,
     xgb_max_depth: int = 7,
     xgb_min_child_weight: int = 2,
@@ -100,12 +96,11 @@ def training_pipeline(
     alpha: float = 1e-5,
     reg_lambda: float = 2e-5,
     focal_gamma: float = 2.0,
-    # ---- NEW feature‑selection knobs ----
-    top_k_features: int = 0,         # 0 = no fixed‑K pruning
-    auto_prune: str = "false",       # "true" to enable MI auto‑prune
-    metric_tol: float = 0.002,       # tolerated drop in PR‑AUC/Brier
-    prune_step: int = 25,            # features removed per iteration
-    use_full_data: str = "true",    # "true" to train on 100% of rows
+    top_k_features: int = 0,
+    auto_prune: str = "false",
+    metric_tol: float = 0.002,
+    prune_step: int = 25,
+    use_full_data: str = "true",
 ):
     training_op(
         project=project,
@@ -122,7 +117,6 @@ def training_pipeline(
         alpha=alpha,
         reg_lambda=reg_lambda,
         focal_gamma=focal_gamma,
-        # pass new flags
         top_k_features=top_k_features,
         auto_prune=auto_prune,
         metric_tol=metric_tol,
@@ -130,10 +124,22 @@ def training_pipeline(
         use_full_data=use_full_data,
     )
 
-# ───────────────── Compile ─────────────────
+# ───────────────── Compile and Upload ─────────────────
 if __name__ == "__main__":
+    local_path = "pipelines/compiled/training_pipeline.json"
+    gcs_path = f"{PIPELINE_ROOT}/training_pipeline.json"
+
+    # ✅ Ensure local directory exists
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
     compiler.Compiler().compile(
         pipeline_func=training_pipeline,
-        package_path="training_pipeline.json",
+        package_path=local_path,
     )
-    print("✓ Compiled training_pipeline.json")
+    print(f"✓ Compiled to {local_path}")
+
+    try:
+        subprocess.run(["gsutil", "cp", local_path, gcs_path], check=True)
+        print(f"✓ Uploaded to {gcs_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"✗ GCS upload failed: {e}")

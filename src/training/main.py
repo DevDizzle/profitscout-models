@@ -148,20 +148,38 @@ def load_data(project_id: str, source_table: str, breakout_threshold: float) -> 
 
 
 def preprocess_data(df: pd.DataFrame, params: dict):
-    """Winsorize, fill, PCA‑reduce embeddings, return arrays + metadata."""
+    """
+    Winsorise, impute, PCA-reduce embeddings, and assemble the feature matrix.
+
+    Returns
+    -------
+    X_all : np.ndarray         # final feature matrix
+    y_all : np.ndarray         # target vector
+    train_idx : pd.Index       # indices for training rows
+    holdout_idx : pd.Index     # indices for hold-out rows
+    feature_names : list[str]  # ordered names of all features in X_all
+    pca_map : dict[str, PCA]   # fitted PCA objects keyed by embedding column
+    imputer : SimpleImputer    # fitted imputer
+    winsor_map : dict[str, tuple[float, float]]
+        Lower / upper clip bounds for each winsorised column.
+    sector_mean_map : dict[str, float]
+        Sector-level fallback means used to fill EPS surprise.
+    """
     split_date = df["earnings_call_date"].quantile(0.8, interpolation="nearest")
-    train_idx = df[df["earnings_call_date"] < split_date].index
+    train_idx   = df[df["earnings_call_date"] < split_date].index
     holdout_idx = df[df["earnings_call_date"] >= split_date].index
 
-    # Winsorize static / engineered numeric features
+    # ---------- winsorise ----------
     winsor_cols = STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS
+    winsor_map: dict[str, tuple[float, float]] = {}
     for col in winsor_cols:
         if col in df.columns:
             lo, hi = df.loc[train_idx, col].quantile(params["winsor_quantiles"])
             df[col] = df[col].clip(lo, hi)
+            winsor_map[col] = (lo, hi)
 
-    # Fill eps_surprise by sector mean
-    sector_mean = (
+    # ---------- EPS surprise sector mean fill ----------
+    sector_mean_map = (
         df.loc[train_idx]
         .groupby("industry_sector")["eps_surprise"]
         .mean()
@@ -169,11 +187,11 @@ def preprocess_data(df: pd.DataFrame, params: dict):
     )
     df["eps_surprise"] = (
         df["eps_surprise"]
-        .fillna(df["industry_sector"].map(sector_mean))
+        .fillna(df["industry_sector"].map(sector_mean_map))
         .fillna(0.0)
     )
 
-    # PCA for each embedding column
+    # ---------- PCA on embeddings ----------
     pca_cols, X_pca_list, pca_map = [], [], {}
     for col in EMB_COLS:
         if col not in df.columns:
@@ -182,11 +200,11 @@ def preprocess_data(df: pd.DataFrame, params: dict):
         if valid.empty:
             continue
 
-        # Ensure consistent dim
+        # Ensure consistent dimension
         emb_lens = valid.apply(lambda x: x.shape[0])
         if emb_lens.nunique() > 1:
             common = emb_lens.mode()[0]
-            valid = valid[emb_lens == common]
+            valid  = valid[emb_lens == common]
             if valid.empty:
                 continue
 
@@ -196,16 +214,17 @@ def preprocess_data(df: pd.DataFrame, params: dict):
 
         stacked = np.vstack(df.loc[train_valid, col].values)
         emb_dim = stacked.shape[1]
-        n_comp = min(params["pca_n"], stacked.shape[0], emb_dim)
+        n_comp  = min(params["pca_n"], stacked.shape[0], emb_dim)
         if n_comp == 0:
             continue
 
-        pca = PCA(n_components=n_comp, random_state=params["random_state"]).fit(stacked)
-        evr = pca.explained_variance_ratio_.sum()
+        pca  = PCA(n_components=n_comp, random_state=params["random_state"]).fit(stacked)
+        evr  = pca.explained_variance_ratio_.sum()
         logging.info("PCA %s → %d comps (EVR %.2f)", col, n_comp, evr)
 
-        full_trans = np.full((len(df), n_comp), np.nan, dtype=np.float32)
-        idx_pos = df.index.get_indexer(valid.index)
+        # transform all rows (missing rows stay NaN)
+        full_trans      = np.full((len(df), n_comp), np.nan, dtype=np.float32)
+        idx_pos         = df.index.get_indexer(valid.index)
         full_trans[idx_pos] = pca.transform(np.vstack(valid.values))
 
         X_pca_list.append(full_trans)
@@ -215,98 +234,94 @@ def preprocess_data(df: pd.DataFrame, params: dict):
 
     X_pca = np.hstack(X_pca_list) if X_pca_list else np.empty((len(df), 0), np.float32)
 
+    # ---------- numeric ----------
     num_final = [c for c in winsor_cols if c in df.columns]
-    missing = set(winsor_cols) - set(num_final)
+    missing   = set(winsor_cols) - set(num_final)
     if missing:
-        logging.warning("Missing numeric cols: %s", missing)
+        logging.warning("Missing numeric columns: %s", missing)
     X_num = df[num_final].to_numpy(dtype=np.float32)
 
-    X_all = np.hstack([X_pca, X_num]).astype(np.float32)
-    y_all = df["breakout"].values
+    # ---------- assemble ----------
+    X_all         = np.hstack([X_pca, X_num]).astype(np.float32)
+    y_all         = df["breakout"].values
     feature_names = pca_cols + num_final
 
-    logging.info(
-        "Feature matrix: %s, Train/Holdout: %d/%d",
-        X_all.shape,
-        len(train_idx),
-        len(holdout_idx),
-    )
+    logging.info("Feature matrix: %s, Train/Holdout: %d/%d",
+                 X_all.shape, len(train_idx), len(holdout_idx))
 
     imputer = SimpleImputer(strategy="constant", fill_value=0).fit(X_all[train_idx])
-    X_all = imputer.transform(X_all)
+    X_all   = imputer.transform(X_all)
 
-    return X_all, y_all, train_idx, holdout_idx, feature_names, pca_map, imputer
-
+    return (X_all, y_all, train_idx, holdout_idx, feature_names,
+            pca_map, imputer, winsor_map, sector_mean_map)
 
 def train_and_evaluate(
-    X_all,
-    y_all,
-    train_idx,
-    holdout_idx,
-    feature_names,
-    params,
-    imputer,
+    X_all: np.ndarray,
+    y_all: np.ndarray,
+    train_idx: pd.Index,
+    holdout_idx: pd.Index,
+    feature_names: list[str],
+    params: dict,
+    imputer: SimpleImputer,
+    winsor_map: dict[str, tuple[float, float]],
+    sector_mean_map: dict[str, float],
 ):
-    """Train XGBoost + LogReg ensemble and return model, metrics, artifacts."""
-
-    # Focal‑loss objective --------------------------------------------------
+    """
+    Train XGBoost + LogReg ensemble, calibrate with isotonic regression,
+    and return Booster, metric dict, and artefact bundle.
+    """
+    # ---------- focal-loss objective ----------
     def focal_binary_obj(preds, dtrain):
         labels = dtrain.get_label()
-        gamma = params["focal_gamma"]
-        p = 1.0 / (1.0 + np.exp(-preds))
-        minus = np.where(labels == 1.0, -1.0, 1.0)
+        gamma  = params["focal_gamma"]
+        p      = 1.0 / (1.0 + np.exp(-preds))
+        minus  = np.where(labels == 1.0, -1.0, 1.0)
 
         eta1 = p * (1.0 - p)
         eta2 = labels + minus * p
         eta3 = p + labels - 1.0
         eta4 = np.clip(1.0 - labels - minus * p, 1e-10, 1.0 - 1e-10)
 
-        grad = (
-            gamma * eta3 * (eta2**gamma) * np.log(eta4)
-            + minus * (eta2 ** (gamma + 1.0))
-        )
+        grad = gamma * eta3 * (eta2**gamma) * np.log(eta4) + minus * (eta2 ** (gamma + 1.0))
         hess = eta1 * (
-            gamma
-            * (
+            gamma * (
                 eta2**gamma
                 + gamma * minus * eta3 * (eta2 ** (gamma - 1.0)) * np.log(eta4)
                 - minus * eta3 * (eta2**gamma) / eta4
-            )
-            + (gamma + 1.0) * (eta2**gamma)
+            ) + (gamma + 1.0) * (eta2**gamma)
         )
         return grad, hess + 1e-16
 
-    # ---------------- Split for early stopping ----------------
-    split = int(len(train_idx) * 0.8)
-    sub_idx, val_idx = train_idx[:split], train_idx[split:]
-
+    # ---------- split for early stopping ----------
+    split      = int(len(train_idx) * 0.8)
+    sub_idx    = train_idx[:split]
+    val_idx    = train_idx[split:]
     X_sub, y_sub = X_all[sub_idx], y_all[sub_idx]
     X_val, y_val = X_all[val_idx], y_all[val_idx]
-    X_tr, y_tr = X_all[train_idx], y_all[train_idx]
-    X_hd, y_hd = X_all[holdout_idx], y_all[holdout_idx]
+    X_tr,  y_tr  = X_all[train_idx], y_all[train_idx]
+    X_hd,  y_hd  = X_all[holdout_idx], y_all[holdout_idx]
 
-    # Scale for LogReg
-    scaler = StandardScaler().fit(X_tr)
-    X_tr_s = scaler.transform(X_tr)
-    X_hd_s = scaler.transform(X_hd)
+    scaler  = StandardScaler().fit(X_tr)
+    X_tr_s  = scaler.transform(X_tr)
+    X_hd_s  = scaler.transform(X_hd)
 
-    # XGBoost ---------------------------------------------------
+    # ---------- XGBoost ----------
     dsub = xgb.DMatrix(X_sub, y_sub, feature_names=feature_names)
     dval = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
-    bst = xgb.train(
+    bst  = xgb.train(
         {
-            "eval_metric": "aucpr",
-            "learning_rate": params["learning_rate"],
-            "max_depth": params["xgb_max_depth"],
+            "eval_metric":      "aucpr",
+            "learning_rate":    params["learning_rate"],
+            "max_depth":        params["xgb_max_depth"],
             "min_child_weight": params["xgb_min_child_weight"],
-            "subsample": params["xgb_subsample"],
+            "subsample":        params["xgb_subsample"],
             "colsample_bytree": params["colsample_bytree"],
-            "gamma": params["gamma"],
-            "alpha": params["alpha"],
-            "lambda": params["reg_lambda"],
-            "tree_method": "hist",
-            "n_jobs": -1,
-            "random_state": params["random_state"],
+            "gamma":            params["gamma"],
+            "alpha":            params["alpha"],
+            "lambda":           params["reg_lambda"],
+            "tree_method":      "hist",
+            "n_jobs":           -1,
+            "random_state":     params["random_state"],
         },
         dsub,
         num_boost_round=3000,
@@ -316,7 +331,7 @@ def train_and_evaluate(
         obj=focal_binary_obj,
     )
 
-    # Logistic Regression --------------------------------------
+    # ---------- Logistic Regression ----------
     logreg = LogisticRegression(
         max_iter=1000,
         C=params["logreg_c"],
@@ -326,17 +341,14 @@ def train_and_evaluate(
         random_state=params["random_state"],
     ).fit(X_tr_s, y_tr)
 
-    # Blend & calibrate ----------------------------------------
-    def _blend(xgb_raw, log_raw):
-        w = params["blend_weight"]
+    # ---------- blend & calibrate ----------
+    def _blend(xgb_raw, log_raw, w=params["blend_weight"]):
         return w * xgb_raw + (1 - w) * log_raw
 
-    dtr = xgb.DMatrix(X_tr, feature_names=feature_names)
-    dho = xgb.DMatrix(X_hd, feature_names=feature_names)
-
+    dtr, dho = xgb.DMatrix(X_tr, feature_names=feature_names), \
+               xgb.DMatrix(X_hd, feature_names=feature_names)
     xgb_tr = bst.predict(dtr, iteration_range=(0, bst.best_iteration + 1))
     xgb_hd = bst.predict(dho, iteration_range=(0, bst.best_iteration + 1))
-
     log_tr = logreg.predict_proba(X_tr_s)[:, 1]
     log_hd = logreg.predict_proba(X_hd_s)[:, 1]
 
@@ -344,29 +356,21 @@ def train_and_evaluate(
     blend_hd = _blend(xgb_hd, log_hd)
 
     calibrator = IsotonicRegression(out_of_bounds="clip").fit(blend_tr, y_tr)
-    prob_hd = calibrator.transform(blend_hd)
+    prob_hd    = calibrator.transform(blend_hd)
 
-    # ---------------- Metrics ----------------
+    # ---------- metrics ----------
     prec, rec, _ = precision_recall_curve(y_hd, prob_hd)
-    pr_auc = auc(rec, prec)
+    pr_auc       = auc(rec, prec)
+    f1           = f1_score(y_hd, (prob_hd >= 0.5).astype(int))
+    recall_at_prec05 = rec[prec >= 0.50].max() if (prec >= 0.50).any() else 0.0
+    brier        = brier_score_loss(y_hd, prob_hd)
 
-    # F1 at default threshold 0.5
-    preds_label = (prob_hd >= 0.5).astype(int)
-    f1 = f1_score(y_hd, preds_label)
-
-    # Recall at precision ≥ 0.50
-    mask = prec >= 0.50
-    recall_at_prec05 = rec[mask].max() if mask.any() else 0.0
-
-    # Brier score
-    brier = brier_score_loss(y_hd, prob_hd)
-
-    metrics = {
-        "pr_auc": float(pr_auc),
-        "f1": float(f1),
-        "recall_at_prec05": float(recall_at_prec05),
-        "brier": float(brier),
-    }
+    metrics = dict(
+        pr_auc=float(pr_auc),
+        f1=float(f1),
+        recall_at_prec05=float(recall_at_prec05),
+        brier=float(brier),
+    )
 
     artifacts = dict(
         imputer=imputer,
@@ -374,11 +378,12 @@ def train_and_evaluate(
         logreg=logreg,
         calibrator=calibrator,
         threshold=params["thresh_req_recall"],
+        winsor_map=winsor_map,
+        sector_mean_map=sector_mean_map,
     )
 
     return bst, metrics, artifacts
-
-
+    
 def save_artifacts(bst, artifacts, pca_map, model_dir: str):
     """
     Persist model + preprocessing artefacts to GCS.
@@ -489,20 +494,15 @@ def main() -> None:
 
     try:
         df = load_data(args.project_id, args.source_table, params["breakout_threshold"])
-        X_all, y_all, train_idx, holdout_idx, feat_names, pca_map, imputer = preprocess_data(df, params)
+        (X_all, y_all, train_idx, holdout_idx, feat_names, pca_map, imputer, winsor_map, sector_mean_map) = preprocess_data(df, params)
 
         # ---------- full‑data override ----------
         if params["use_full_data"]:
             train_idx = holdout_idx = np.arange(len(df))
             logging.info("Using 100%% of rows for training; hold‑out metrics will be skipped.")
 
-        # ---------- (optional) feature selection ----------
-        # ... unchanged MI pruning logic ...
-
         # ---------- Train ----------
-        bst, metrics, artifacts = train_and_evaluate(
-            X_all, y_all, train_idx, holdout_idx, feat_names, params, imputer
-        )
+        bst, metrics, artifacts = train_and_evaluate( X_all, y_all, train_idx, holdout_idx, feat_names,params, imputer, winsor_map, sector_mean_map)
 
         # If we trained on full data, blank out misleading metrics
         if params["use_full_data"]:

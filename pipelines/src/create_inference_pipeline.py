@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Vertex AI pipeline that
+Vertex AI pipeline that
   1) builds a prediction batch in BigQuery
   2) runs a custom‑container job to score it
 """
 
-from google_cloud_pipeline_components.v1.bigquery import BigqueryQueryJobOp
-from google_cloud_pipeline_components.v1.custom_job   import CustomTrainingJobOp
+import os
+import subprocess
 from kfp import dsl, compiler
+from google_cloud_pipeline_components.v1.bigquery import BigqueryQueryJobOp
+from google_cloud_pipeline_components.v1.custom_job import CustomTrainingJobOp
 
 # ───────── config ─────────
 PROJECT_ID  = "profitscout-lx6bb"
@@ -31,33 +33,27 @@ PREDICTION_OUTPUT_TBL = f"{PROJECT_ID}.{DATASET}.predictions"
 def inference_pipeline(
     project:  str = PROJECT_ID,
     location: str = REGION,
-    # artefacts for the model version you want to run
-    model_version_dir: str = (
-        f"gs://{PROJECT_ID}-pipeline-artifacts/training/model-artifacts"
-    ),
-    # pruning knobs (kept for parity with training)
+    model_version_dir: str = f"gs://{PROJECT_ID}-pipeline-artifacts/training/model-artifacts",
     top_k_features: int = 0,
     auto_prune: str = "false",
     metric_tol: float = 0.002,
     prune_step: int = 25,
 ):
-    # 1️⃣  Build the batch to predict (rows with NULL max_close_30d)
     stage_batch = BigqueryQueryJobOp(
-        project  = project,
-        location = location,
+        project=project,
+        location=location,
         query=f"""
-          CREATE OR REPLACE TABLE `{PREDICTION_INPUT_TBL}` AS
-          SELECT *
-          FROM   `{project}.{FEATURES_TBL}`
-          WHERE  max_close_30d IS NULL
+            CREATE OR REPLACE TABLE `{PREDICTION_INPUT_TBL}` AS
+            SELECT *
+            FROM   `{project}.{FEATURES_TBL}`
+            WHERE  max_close_30d IS NULL
         """,
     )
 
-    # 2️⃣  Score the batch using your custom container
     CustomTrainingJobOp(
-        display_name = "profitscout-prediction-job",
-        project      = project,
-        location     = location,
+        display_name="profitscout-prediction-job",
+        project=project,
+        location=location,
         worker_pool_specs=[{
             "machine_spec":  {"machine_type": "n1-standard-4"},
             "replica_count": 1,
@@ -65,7 +61,7 @@ def inference_pipeline(
                 "image_uri": PREDICTOR_IMAGE,
                 "args": [
                     "--project-id",         project,
-                    "--source-table", f"{DATASET}.prediction_input",
+                    "--source-table",       f"{DATASET}.prediction_input",
                     "--destination-table",  PREDICTION_OUTPUT_TBL,
                     "--model-dir",          model_version_dir,
                     "--top-k-features",     top_k_features,
@@ -79,8 +75,22 @@ def inference_pipeline(
 
 # ───────── compile ─────────
 if __name__ == "__main__":
+    local_path = "pipelines/compiled/inference_pipeline.json"
+    gcs_path   = f"{PIPELINE_ROOT}/inference_pipeline.json"
+
+    # Ensure local folder exists
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    # Compile the pipeline
     compiler.Compiler().compile(
-        pipeline_func = inference_pipeline,
-        package_path  = "inference_pipeline.json",
+        pipeline_func=inference_pipeline,
+        package_path=local_path,
     )
-    print("✓ Compiled inference_pipeline.json")
+    print(f"✓ Compiled to {local_path}")
+
+    # Upload to GCS
+    try:
+        subprocess.run(["gsutil", "cp", local_path, gcs_path], check=True)
+        print(f"✓ Uploaded to {gcs_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Failed to upload to GCS: {e}")
