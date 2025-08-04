@@ -1,8 +1,3 @@
-"""
-Cloud Run Pub/Sub loader: decode Pub/Sub, validate, and stream rows to BigQuery
-using insert_rows_json (tabledata.insertAll) – simple & quota-friendly.
-"""
-
 import os, json, base64, logging
 from typing import List, Dict, Any
 from flask import Flask, request, jsonify
