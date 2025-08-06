@@ -23,5 +23,7 @@ EXPOSE 8080
 # Define environment variable
 ENV PORT 8080
 
-# Run main.py when the container launches using Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "main:app"]
+# … everything above stays the same …
+
+# Gunicorn: 2 workers × 2 threads handles more messages per instance
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", "--timeout", "0", "main:app"]

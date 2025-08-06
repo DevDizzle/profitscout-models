@@ -1,1 +1,5 @@
+# src/ingestion/discovery/requirements.txt
+functions-framework
 google-cloud-pubsub
+google-cloud-storage
+google-cloud-bigquery

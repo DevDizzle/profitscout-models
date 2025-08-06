@@ -1,60 +1,85 @@
-"""Cloud Function to publish Pub/Sub messages for new transcripts."""
-
+# src/ingestion/discovery/main.py
 import os
-import logging
 import json
-from google.cloud import pubsub_v1
+import logging
+from google.cloud import pubsub_v1, storage, bigquery
+import functions_framework
 
-PUB_SUB_TOPIC = os.environ.get('PUB_SUB_TOPIC') 
+# --- Environment Variables ---
+PROJECT_ID = os.environ.get("PROJECT_ID", "profitscout-lx6bb")
+PUB_SUB_TOPIC = os.environ.get("PUB_SUB_TOPIC", "process-earnings-call")
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "profit-scout-data")
+BQ_TABLE_ID = os.environ.get("BQ_TABLE_ID", "profitscout-lx6bb.profit_scout.breakout_features")
+GCS_SUMMARIES_PREFIX = "earnings-call-summaries/"
+GCS_TRANSCRIPTS_PREFIX = "earnings-call-transcripts/" # Define transcript prefix for consistency
 
-# Initialize a single PublisherClient
+# --- Clients ---
 publisher = pubsub_v1.PublisherClient()
+storage_client = storage.Client()
+bq_client = bigquery.Client()
 
 logging.basicConfig(level=logging.INFO)
 
-def discover_new_summary(event, context):
-    """
-    A Cloud Function triggered by a new file in GCS. 
-    
-    It parses the file's name to extract metadata and publishes a message 
-    to a Pub/Sub topic for the feature-engineering service to process.
-    """
-    # The event payload contains metadata for the file that triggered the function
-    bucket_name = event['bucket']
-    file_name = event['name']
-
-    logging.info(f"Function triggered by file: {file_name} in bucket: {bucket_name}.")
-
-    # For safety and clarity, ensure the file is what we expect.
-    # The GCS trigger itself should be filtered to this path for best performance.
-    if not file_name.startswith('earnings-call-summaries/') or not file_name.endswith('.txt'):
-        logging.info(f"Skipping file '{file_name}' because it's not a new summary.")
-        return 'OK', 200
-
+def get_existing_features():
+    """Queries BigQuery to get a set of existing 'ticker_date' combinations."""
+    query = f"SELECT DISTINCT ticker, quarter_end_date FROM `{BQ_TABLE_ID}`"
     try:
-        base_name = os.path.basename(file_name)
-        ticker, q_end_str = os.path.splitext(base_name)[0].rsplit('_', 1)
-
-        logging.info(f"Identified Ticker: {ticker}, Quarter: {q_end_str}. Publishing message.")
-
-        # Construct the message payload for the downstream service
-        message_data = {
-            "ticker": ticker,
-            "quarter_end_date": q_end_str,
-            "summary_gcs_path": f"gs://{bucket_name}/{file_name}",
-            # The path to the full transcript is inferred from a consistent naming convention
-            "transcript_gcs_path": f"gs://{bucket_name}/earnings-call-transcripts/{ticker}_{q_end_str}.json"
-        }
-
-        # Publish the message to Pub/Sub, letting the feature-engineering service take over
-        future = publisher.publish(PUB_SUB_TOPIC, data=json.dumps(message_data).encode('utf-8'))
-        future.result()  # Ensures the message is sent before the function exits
-
-        logging.info(f"Successfully published message for {ticker}_{q_end_str}")
-
-    except (ValueError, IndexError) as e:
-        # This error handles cases where the filename is not in the expected format
-        logging.error(f"Could not parse ticker and date from filename: '{file_name}'. Error: {e}")
+        rows = bq_client.query(query).result()
+        return {f"{row.ticker}_{row.quarter_end_date.isoformat()}" for row in rows}
     except Exception as e:
-        logging.error(f"An unexpected error occurred processing file {file_name}: {e}")
-    return 'OK', 200
+        logging.error(f"Failed to query BigQuery for existing features: {e}")
+        return set()
+
+@functions_framework.http
+def discover_missing_features(request):
+    """
+    Scans a GCS bucket for summaries, compares against features in BigQuery,
+    and publishes messages for any missing features.
+    """
+    logging.info("Starting discovery of missing features...")
+
+    existing_features = get_existing_features()
+    logging.info(f"Found {len(existing_features)} existing features in BigQuery.")
+
+    all_summary_blobs = storage_client.list_blobs(BUCKET_NAME, prefix=GCS_SUMMARIES_PREFIX)
+    
+    files_to_process = []
+    for blob in all_summary_blobs:
+        if not blob.name.endswith('.txt'):
+            continue
+        
+        file_key = os.path.basename(blob.name).removesuffix('.txt')
+        
+        if file_key not in existing_features:
+            files_to_process.append((file_key, blob.name))
+
+    if not files_to_process:
+        logging.info("No new summaries to process. Feature store is up to date.")
+        return "No new summaries to process.", 200
+
+    topic_path = publisher.topic_path(PROJECT_ID, PUB_SUB_TOPIC)
+    published_count = 0
+    logging.info(f"Found {len(files_to_process)} missing features. Publishing messages...")
+    
+    for file_key, gcs_path in files_to_process:
+        try:
+            ticker, q_end_date = file_key.split('_')
+            
+            # --- FIX: Added the required 'transcript_gcs_path' to the message ---
+            message_data = {
+                "ticker": ticker,
+                "quarter_end_date": q_end_date,
+                "summary_gcs_path": f"gs://{BUCKET_NAME}/{gcs_path}",
+                "transcript_gcs_path": f"gs://{BUCKET_NAME}/{GCS_TRANSCRIPTS_PREFIX}{file_key}.json"
+            }
+            
+            future = publisher.publish(topic_path, data=json.dumps(message_data).encode('utf-8'))
+            future.result()
+            published_count += 1
+            
+        except Exception as e:
+            logging.error(f"Failed to publish message for {gcs_path}: {e}")
+
+    final_message = f"Discovery complete. Published {published_count} messages for processing."
+    logging.info(final_message)
+    return final_message, 200

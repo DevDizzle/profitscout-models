@@ -342,18 +342,21 @@ def train_and_evaluate(
     ).fit(X_tr_s, y_tr)
 
     # ---------- blend & calibrate ----------
-    def _blend(xgb_raw, log_raw, w=params["blend_weight"]):
-        return w * xgb_raw + (1 - w) * log_raw
+    def _blend(xgb_prob, log_raw, w=params["blend_weight"]):
+        return w * xgb_prob + (1 - w) * log_raw
 
     dtr, dho = xgb.DMatrix(X_tr, feature_names=feature_names), \
                xgb.DMatrix(X_hd, feature_names=feature_names)
-    xgb_tr = bst.predict(dtr, iteration_range=(0, bst.best_iteration + 1))
-    xgb_hd = bst.predict(dho, iteration_range=(0, bst.best_iteration + 1))
+    xgb_tr_raw = bst.predict(dtr, iteration_range=(0, bst.best_iteration + 1))
+    xgb_hd_raw = bst.predict(dho, iteration_range=(0, bst.best_iteration + 1))
+    # Convert XGBoost logits to probabilities
+    xgb_tr_prob = 1 / (1 + np.exp(-xgb_tr_raw))
+    xgb_hd_prob = 1 / (1 + np.exp(-xgb_hd_raw))
     log_tr = logreg.predict_proba(X_tr_s)[:, 1]
     log_hd = logreg.predict_proba(X_hd_s)[:, 1]
 
-    blend_tr = _blend(xgb_tr, log_tr)
-    blend_hd = _blend(xgb_hd, log_hd)
+    blend_tr = _blend(xgb_tr_prob, log_tr)
+    blend_hd = _blend(xgb_hd_prob, log_hd)
 
     calibrator = IsotonicRegression(out_of_bounds="clip").fit(blend_tr, y_tr)
     prob_hd    = calibrator.transform(blend_hd)

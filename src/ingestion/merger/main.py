@@ -18,9 +18,7 @@ logging.basicConfig(level=logging.INFO)
 # Strict: Abort insert if null (core identifiers/embeddings)
 STRICT_NOT_NULL_COLUMNS = [
     "ticker", "quarter_end_date", "earnings_call_date",
-    "key_financial_metrics_embedding", "key_discussion_points_embedding",
-    "sentiment_tone_embedding", "short_term_outlook_embedding", "forward_looking_signals_embedding",
-    "qa_summary_embedding",
+    "summary_embedding",
     "sector", "industry", "adj_close_on_call_date", "industry_sector"
 ]
 
@@ -31,23 +29,13 @@ SOFT_NOT_NULL_COLUMNS = [
     "rsi_14_delta", "adx_14_delta",
     # Engineered columns
     "eps_surprise_isnull", "price_sma20_ratio", "ema50_sma20_ratio", "rsi_centered",
-    "sent_rsi", "adx_log1p", "key_financial_metrics_norm", "key_financial_metrics_mean",
-    "key_financial_metrics_std", "key_discussion_points_norm", "key_discussion_points_mean",
-    "key_discussion_points_std", "sentiment_tone_norm", "sentiment_tone_mean",
-    "sentiment_tone_std", "short_term_outlook_norm", "short_term_outlook_mean",
-    "short_term_outlook_std", "forward_looking_signals_norm", "forward_looking_signals_mean",
-    "forward_looking_signals_std", "qa_summary_norm", "qa_summary_mean", "qa_summary_std",
-    "cos_fin_disc", "cos_fin_tone", "cos_disc_short", "cos_short_fwd",
+    "sent_rsi", "adx_log1p", "summary_norm", "summary_mean",
+    "summary_std",
     # LDA topics
     "lda_topic_0", "lda_topic_1", "lda_topic_2", "lda_topic_3", "lda_topic_4",
     "lda_topic_5", "lda_topic_6", "lda_topic_7", "lda_topic_8", "lda_topic_9",
     # FinBERT sentiments
-    "key_financial_metrics_pos_prob", "key_financial_metrics_neg_prob", "key_financial_metrics_neu_prob",
-    "key_discussion_points_pos_prob", "key_discussion_points_neg_prob", "key_discussion_points_neu_prob",
-    "sentiment_tone_pos_prob", "sentiment_tone_neg_prob", "sentiment_tone_neu_prob",
-    "short_term_outlook_pos_prob", "short_term_outlook_neg_prob", "short_term_outlook_neu_prob",
-    "forward_looking_signals_pos_prob", "forward_looking_signals_neg_prob", "forward_looking_signals_neu_prob",
-    "qa_summary_pos_prob", "qa_summary_neg_prob", "qa_summary_neu_prob"
+    "pos_prob", "neg_prob", "neu_prob"
 ]
 
 # Threshold for soft warnings (e.g., warn if >10% nulls)
@@ -77,7 +65,7 @@ def merge_staging_to_final(request):
         stats_job = bq_client.query(stats_query)
         stats = stats_job.to_dataframe().iloc[0]
         row_count = stats['row_count']
-        logging.info(f"Staging stats: {row_count} rows")
+        logging.info("Staging stats: {row_count} rows")
 
         for col in STRICT_NOT_NULL_COLUMNS:
             null_count = stats[f'null_{col}']
@@ -152,7 +140,7 @@ def merge_staging_to_final(request):
         # Post-merge: Sample verification (null check on final for engineered)
         post_stats_query = f"""
         SELECT 
-          {', '.join(f'COUNTIF({col} IS NULL) AS null_{col}' for col in SOFT_NOT_NULL_COLUMNS if '_norm' in col or 'cos_' in col or 'lda_' in col or '_prob' in col)}  -- Focus on engineered, LDA, FinBERT
+          {', '.join(f'COUNTIF({col} IS NULL) AS null_{col}' for col in SOFT_NOT_NULL_COLUMNS if '_norm' in col or 'lda_' in col or '_prob' in col)}  -- Focus on engineered, LDA, FinBERT
         FROM `{final_full}`
         """
         post_stats = bq_client.query(post_stats_query).to_dataframe().iloc[0]

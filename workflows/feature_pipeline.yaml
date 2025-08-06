@@ -1,0 +1,69 @@
+#
+# Daily Feature Engineering Pipeline (All-in-One)
+# This single workflow orchestrates the entire process from discovery to final merge.
+# It should be scheduled to run once daily (e.g., M-F at 6:30 PM).
+#
+
+main:
+  steps:
+    - init:
+        assign:
+          - project_id: "profitscout-lx6bb"
+          - region: "us-central1"
+          - discovery_function_name: "discovery-summaries"
+          - merger_function_name: "merger-service"
+          - updater_function_name: "update-max-close"
+          - processing_wait_time_seconds: 3600
+
+    - log_start:
+        call: sys.log
+        args:
+            text: "Starting daily feature engineering pipeline..."
+
+    # Step 1: Kick off the asynchronous processing
+    # Call the discovery function to find new files and start the event chain.
+    - call_discovery:
+        call: http.post
+        args:
+            url: ${"https://" + region + "-" + project_id + ".cloudfunctions.net/" + discovery_function_name}
+            auth: {type: OIDC}
+            timeout: 900 # 15 minutes
+        result: discovery_result
+
+    # Step 2: Wait for processing to complete
+    # The discovery -> feature-engineering -> loader chain runs asynchronously.
+    # We must wait long enough for all files to be processed and loaded into the staging table.
+    - wait_for_async_processing:
+        call: sys.log
+        args:
+            text: ${"Discovery complete. Waiting " + string(processing_wait_time_seconds) + " seconds for feature engineering and loading to finish."}
+    - processing_wait:
+        call: sys.sleep
+        args:
+            seconds: ${processing_wait_time_seconds}
+
+    # Step 3: Run the final batch jobs
+    - run_batch_jobs:
+        steps:
+          - call_merger:
+              call: http.post
+              args:
+                  url: ${"https://" + region + "-" + project_id + ".cloudfunctions.net/" + merger_function_name}
+                  auth: {type: OIDC}
+                  timeout: 600 # 5 minutes
+              result: merger_result
+
+          - call_updater:
+              call: http.post
+              args:
+                  url: ${"https://" + region + "-" + project_id + ".cloudfunctions.net/" + updater_function_name}
+                  auth: {type: OIDC}
+                  timeout: 600 # 5 minutes
+              result: updater_result
+
+    - log_finish:
+        call: sys.log
+        args:
+            text: "Pipeline finished successfully. Feature store is up to date."
+    - done:
+        return: "Workflow complete."
