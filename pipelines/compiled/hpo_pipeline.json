@@ -181,9 +181,9 @@
                       "conditional_parameter_specs": [],
                       "discrete_value_spec": {
                         "values": [
-                          112.0,
+                          64.0,
                           128.0,
-                          144.0
+                          256.0
                         ]
                       },
                       "parameter_id": "pca_n",
@@ -192,8 +192,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "7",
-                        "min_value": "6"
+                        "max_value": "10",
+                        "min_value": "3"
                       },
                       "parameter_id": "xgb_max_depth",
                       "scale_type": 1.0
@@ -201,7 +201,7 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "3",
+                        "max_value": "10",
                         "min_value": "1"
                       },
                       "parameter_id": "xgb_min_child_weight",
@@ -210,8 +210,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.92,
-                        "min_value": 0.88
+                        "max_value": 1.0,
+                        "min_value": 0.5
                       },
                       "parameter_id": "xgb_subsample",
                       "scale_type": 1.0
@@ -219,26 +219,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.011,
-                        "min_value": 0.009
-                      },
-                      "parameter_id": "logreg_c",
-                      "scale_type": 2.0
-                    },
-                    {
-                      "conditional_parameter_specs": [],
-                      "double_value_spec": {
-                        "max_value": 0.62,
-                        "min_value": 0.58
-                      },
-                      "parameter_id": "blend_weight",
-                      "scale_type": 1.0
-                    },
-                    {
-                      "conditional_parameter_specs": [],
-                      "double_value_spec": {
-                        "max_value": 0.024,
-                        "min_value": 0.018
+                        "max_value": 0.1,
+                        "min_value": 0.01
                       },
                       "parameter_id": "learning_rate",
                       "scale_type": 2.0
@@ -246,8 +228,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.12,
-                        "min_value": 0.08
+                        "max_value": 0.5,
+                        "min_value": 0.0
                       },
                       "parameter_id": "gamma",
                       "scale_type": 1.0
@@ -255,8 +237,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.94,
-                        "min_value": 0.88
+                        "max_value": 1.0,
+                        "min_value": 0.5
                       },
                       "parameter_id": "colsample_bytree",
                       "scale_type": 1.0
@@ -264,8 +246,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.0003,
-                        "min_value": 3e-05
+                        "max_value": 0.01,
+                        "min_value": 1e-06
                       },
                       "parameter_id": "alpha",
                       "scale_type": 2.0
@@ -273,8 +255,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.0003,
-                        "min_value": 3e-05
+                        "max_value": 0.01,
+                        "min_value": 1e-06
                       },
                       "parameter_id": "reg_lambda",
                       "scale_type": 2.0
@@ -282,8 +264,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 2.2,
-                        "min_value": 1.8
+                        "max_value": 5.0,
+                        "min_value": 1.0
                       },
                       "parameter_id": "focal_gamma",
                       "scale_type": 1.0
@@ -300,7 +282,13 @@
                           "--project-id",
                           "{{$.inputs.parameters['pipelinechannel--project']}}",
                           "--source-table",
-                          "{{$.inputs.parameters['pipelinechannel--source_table']}}"
+                          "{{$.inputs.parameters['pipelinechannel--source_table']}}",
+                          "--auto-prune",
+                          "false",
+                          "--top-k-features",
+                          "0",
+                          "--use-full-data",
+                          "false"
                         ],
                         "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
                       },
@@ -328,7 +316,7 @@
           "parameterType": "STRING"
         },
         "max_trial_count": {
-          "defaultValue": 30.0,
+          "defaultValue": 50.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },
@@ -351,5 +339,5 @@
     }
   },
   "schemaVersion": "2.1.0",
-  "sdkVersion": "kfp-2.13.0"
+  "sdkVersion": "kfp-2.14.2"
 }

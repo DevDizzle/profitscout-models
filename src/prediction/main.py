@@ -21,12 +21,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ─────────────────── Feature Definitions (must match trainer) ───────────────────
 EMB_COLS = [
-    "key_financial_metrics_embedding",
-    "key_discussion_points_embedding",
-    "sentiment_tone_embedding",
-    "short_term_outlook_embedding",
-    "forward_looking_signals_embedding",
-    "qa_summary_embedding",
+    "summary_embedding",
 ]
 
 STATIC_NUM_COLS = [
@@ -49,26 +44,19 @@ ENGINEERED_COLS = [
     "adx_log1p",
     "sent_rsi",
     "eps_surprise_isnull",
-    "cos_fin_disc",
-    "cos_fin_tone",
-    "cos_disc_short",
-    "cos_short_fwd",
 ]
+
+for _c in EMB_COLS:
+    _b = _c.replace("_embedding", "")
+    ENGINEERED_COLS.extend([f"{_b}_norm", f"{_b}_mean", f"{_b}_std"])
 
 LDA_COLS = [f"lda_topic_{i}" for i in range(10)]
 
-FINBERT_COLS = []
-for _sec in [
-    "key_financial_metrics",
-    "key_discussion_points",
-    "sentiment_tone",
-    "short_term_outlook",
-    "forward_looking_signals",
-    "qa_summary",
-]:
-    FINBERT_COLS.extend(
-        [f"{_sec}_pos_prob", f"{_sec}_neg_prob", f"{_sec}_neu_prob"]
-    )
+FINBERT_COLS = [
+    "pos_prob",
+    "neg_prob",
+    "neu_prob",
+]
 
 # ──────────────────────────── Modular Functions ────────────────────────────
 def load_artifacts(model_dir: str):
@@ -172,15 +160,10 @@ def preprocess_for_inference(df: pd.DataFrame, artifacts: dict):
     X_pca = np.hstack(X_pca_list) if X_pca_list else np.empty((len(df), 0), np.float32)
 
     # --- numeric features ---
-    engineered = ENGINEERED_COLS.copy()
-    for c in EMB_COLS:
-        base = c.replace("_embedding", "")
-        engineered.extend([f"{base}_norm", f"{base}_mean", f"{base}_std"])
-
     final_num_cols = [
         c
         for c in (
-            STATIC_NUM_COLS + engineered + LDA_COLS + FINBERT_COLS
+            STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS
         )
         if c in df.columns
     ]
@@ -229,15 +212,14 @@ def preprocess_for_inference(df: pd.DataFrame, artifacts: dict):
             f"Feature mismatch: expected {expected_n} features, got {actual_n}"
         )
 
-    # --- Impute & scale (LogReg path) ---
+    # --- Impute ---
     X_imp = artifacts["imputer"].transform(X_all)
-    X_scl = artifacts["scaler"].transform(X_imp)
 
-    return X_imp, X_scl, feature_names
+    return X_imp, feature_names
 
 
-def make_predictions(bst, artifacts: dict, X_imp: np.ndarray, X_scl: np.ndarray, feature_names: list):
-    """Generates calibrated blended predictions."""
+def make_predictions(bst, artifacts: dict, X_imp: np.ndarray, feature_names: list):
+    """Generates calibrated predictions."""
     logging.info("Generating predictions…")
 
     dpred = xgb.DMatrix(X_imp, feature_names=feature_names)
@@ -249,23 +231,15 @@ def make_predictions(bst, artifacts: dict, X_imp: np.ndarray, X_scl: np.ndarray,
     else:  # Assume XGBClassifier or similar
         xgb_prob = bst.predict_proba(dpred)[:, 1]
 
-    log_raw = artifacts["logreg"].predict_proba(X_scl)[:, 1]
-
-    w = artifacts.get("blend_weight", 0.5)
-    blend_raw = w * xgb_prob + (1 - w) * log_raw
-    prob = artifacts["calibrator"].transform(blend_raw)
+    prob = artifacts["calibrator"].transform(xgb_prob)
     preds = (prob >= artifacts["threshold"]).astype(int)
 
     # Add these logs
     logging.info(f"XGBoost probs: min={xgb_prob.min():.4f}, max={xgb_prob.max():.4f}, mean={xgb_prob.mean():.4f}")
-    logging.info(f"LogReg probs: min={log_raw.min():.4f}, max={log_raw.max():.4f}, mean={log_raw.mean():.4f}")
-    logging.info(f"Blended raw: min={blend_raw.min():.4f}, max={blend_raw.max():.4f}, mean={blend_raw.mean():.4f}")
     logging.info(f"Calibrated probs: min={prob.min():.4f}, max={prob.max():.4f}, mean={prob.mean():.4f}")
 
     return pd.DataFrame({
         "xgb_probability": xgb_prob,
-        "logreg_probability": log_raw,
-        "blended_raw": blend_raw,
         "calibrated_probability": prob,
         "prediction": preds,
     })
@@ -280,8 +254,6 @@ def save_predictions(df: pd.DataFrame, project_id: str, destination_table: str):
             bigquery.SchemaField("quarter_end_date", "DATE"),
             bigquery.SchemaField("earnings_call_date", "DATE"),
             bigquery.SchemaField("xgb_probability", "FLOAT64"),
-            bigquery.SchemaField("logreg_probability", "FLOAT64"),
-            bigquery.SchemaField("blended_raw", "FLOAT64"),
             bigquery.SchemaField("calibrated_probability", "FLOAT64"),
             bigquery.SchemaField("prediction", "INTEGER"),
         ],
@@ -319,8 +291,8 @@ def main() -> None:
         logging.info("No rows to predict on – exiting.")
         return
 
-    X_imp, X_scl, feat_names = preprocess_for_inference(df_source, artifacts)
-    df_preds = make_predictions(bst, artifacts, X_imp, X_scl, feat_names)
+    X_imp, feat_names = preprocess_for_inference(df_source, artifacts)
+    df_preds = make_predictions(bst, artifacts, X_imp, feat_names)
 
     df_out = pd.concat(
         [

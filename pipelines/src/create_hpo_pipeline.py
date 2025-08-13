@@ -30,7 +30,7 @@ def hpo_pipeline(
     project: str = PROJECT_ID,
     location: str = REGION,
     source_table: str = "profit_scout.breakout_features",
-    max_trial_count: int = 30,
+    max_trial_count: int = 50,
     parallel_trial_count: int = 3,
 ):
     # -------- training container spec --------
@@ -55,20 +55,18 @@ def hpo_pipeline(
     # -------- single optimisation metric --------
     metric_spec = serialize_metrics({"pr_auc": "maximize"})
 
-    # -------- tightened search space --------
+    # -------- widened search space --------
     parameter_spec = serialize_parameters({
-        "pca_n":                hpt.DiscreteParameterSpec([112, 128, 144]),
-        "xgb_max_depth":        hpt.IntegerParameterSpec(6, 7, "linear"),
-        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 3, "linear"),
-        "xgb_subsample":        hpt.DoubleParameterSpec(0.88, 0.92, "linear"),
-        "logreg_c":             hpt.DoubleParameterSpec(0.009, 0.011, "log"),
-        "blend_weight":         hpt.DoubleParameterSpec(0.58, 0.62, "linear"),
-        "learning_rate":        hpt.DoubleParameterSpec(0.018, 0.024, "log"),
-        "gamma":                hpt.DoubleParameterSpec(0.08, 0.12, "linear"),
-        "colsample_bytree":     hpt.DoubleParameterSpec(0.88, 0.94, "linear"),
-        "alpha":                hpt.DoubleParameterSpec(3e-5, 3e-4, "log"),
-        "reg_lambda":           hpt.DoubleParameterSpec(3e-5, 3e-4, "log"),
-        "focal_gamma":          hpt.DoubleParameterSpec(1.8, 2.2, "linear"),
+        "pca_n":                hpt.DiscreteParameterSpec(values=[64, 128, 256], scale="linear"),
+        "xgb_max_depth":        hpt.IntegerParameterSpec(3, 10, "linear"),
+        "xgb_min_child_weight": hpt.IntegerParameterSpec(1, 10, "linear"),
+        "xgb_subsample":        hpt.DoubleParameterSpec(0.5, 1.0, "linear"),
+        "learning_rate":        hpt.DoubleParameterSpec(0.01, 0.1, "log"),
+        "gamma":                hpt.DoubleParameterSpec(0.0, 0.5, "linear"),
+        "colsample_bytree":     hpt.DoubleParameterSpec(0.5, 1.0, "linear"),
+        "alpha":                hpt.DoubleParameterSpec(1e-6, 1e-2, "log"),
+        "reg_lambda":           hpt.DoubleParameterSpec(1e-6, 1e-2, "log"),
+        "focal_gamma":          hpt.DoubleParameterSpec(1.0, 5.0, "linear"),
     })
 
     # -------- HPT job op --------

@@ -34,10 +34,6 @@ def inference_pipeline(
     project:  str = PROJECT_ID,
     location: str = REGION,
     model_version_dir: str = f"gs://{PROJECT_ID}-pipeline-artifacts/training/model-artifacts",
-    top_k_features: int = 0,
-    auto_prune: str = "false",
-    metric_tol: float = 0.002,
-    prune_step: int = 25,
 ):
     stage_batch = BigqueryQueryJobOp(
         project=project,
@@ -64,10 +60,6 @@ def inference_pipeline(
                     "--source-table",       f"{DATASET}.prediction_input",
                     "--destination-table",  PREDICTION_OUTPUT_TBL,
                     "--model-dir",          model_version_dir,
-                    "--top-k-features",     top_k_features,
-                    "--auto-prune",         auto_prune,
-                    "--metric-tol",         metric_tol,
-                    "--prune-step",         prune_step,
                 ],
             },
         }],
