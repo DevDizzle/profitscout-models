@@ -181,9 +181,9 @@
                       "conditional_parameter_specs": [],
                       "discrete_value_spec": {
                         "values": [
-                          64.0,
-                          128.0,
-                          256.0
+                          256.0,
+                          384.0,
+                          512.0
                         ]
                       },
                       "parameter_id": "pca_n",
@@ -192,8 +192,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
-                        "max_value": "10",
-                        "min_value": "3"
+                        "max_value": "8",
+                        "min_value": "4"
                       },
                       "parameter_id": "xgb_max_depth",
                       "scale_type": 1.0
@@ -202,7 +202,7 @@
                       "conditional_parameter_specs": [],
                       "integer_value_spec": {
                         "max_value": "10",
-                        "min_value": "1"
+                        "min_value": "6"
                       },
                       "parameter_id": "xgb_min_child_weight",
                       "scale_type": 1.0
@@ -211,7 +211,7 @@
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
                         "max_value": 1.0,
-                        "min_value": 0.5
+                        "min_value": 0.8
                       },
                       "parameter_id": "xgb_subsample",
                       "scale_type": 1.0
@@ -219,7 +219,7 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.1,
+                        "max_value": 0.05,
                         "min_value": 0.01
                       },
                       "parameter_id": "learning_rate",
@@ -229,7 +229,7 @@
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
                         "max_value": 0.5,
-                        "min_value": 0.0
+                        "min_value": 0.2
                       },
                       "parameter_id": "gamma",
                       "scale_type": 1.0
@@ -238,7 +238,7 @@
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
                         "max_value": 1.0,
-                        "min_value": 0.5
+                        "min_value": 0.7
                       },
                       "parameter_id": "colsample_bytree",
                       "scale_type": 1.0
@@ -246,8 +246,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.01,
-                        "min_value": 1e-06
+                        "max_value": 0.001,
+                        "min_value": 1e-05
                       },
                       "parameter_id": "alpha",
                       "scale_type": 2.0
@@ -255,8 +255,8 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 0.01,
-                        "min_value": 1e-06
+                        "max_value": 0.001,
+                        "min_value": 1e-05
                       },
                       "parameter_id": "reg_lambda",
                       "scale_type": 2.0
@@ -264,7 +264,7 @@
                     {
                       "conditional_parameter_specs": [],
                       "double_value_spec": {
-                        "max_value": 5.0,
+                        "max_value": 3.0,
                         "min_value": 1.0
                       },
                       "parameter_id": "focal_gamma",
@@ -316,7 +316,7 @@
           "parameterType": "STRING"
         },
         "max_trial_count": {
-          "defaultValue": 50.0,
+          "defaultValue": 60.0,
           "isOptional": true,
           "parameterType": "NUMBER_INTEGER"
         },

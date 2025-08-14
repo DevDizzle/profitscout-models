@@ -3,6 +3,7 @@
 Vertex AI pipeline that
   1) builds a prediction batch in BigQuery
   2) runs a custom‑container job to score it
+  gcloud builds submit --tag us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/predictor:latest .
 """
 
 import os

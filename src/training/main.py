@@ -190,6 +190,8 @@ def preprocess_data(df: pd.DataFrame, params: dict):
         pca = PCA(n_components=n_comp, random_state=params["random_state"]).fit(stacked)
         evr = pca.explained_variance_ratio_.sum()
         logging.info("PCA %s → %d comps (EVR %.2f)", col, n_comp, evr)
+        logging.info("Explained variance ratios: %s", list(pca.explained_variance_ratio_))
+        logging.info("Explained variances: %s", list(pca.explained_variance_))
         # transform all rows (missing rows stay NaN)
         full_trans = np.full((len(df), n_comp), np.nan, dtype=np.float32)
         idx_pos = df.index.get_indexer(valid.index)
@@ -202,9 +204,7 @@ def preprocess_data(df: pd.DataFrame, params: dict):
 
     # ---------- numeric ----------
     num_final = [c for c in winsor_cols if c in df.columns]
-    missing = set(winsor_cols) - set(num_final)
-    if missing:
-        logging.warning("Missing numeric columns: %s", missing)
+
     X_num = df[num_final].to_numpy(dtype=np.float32)
 
     # ---------- assemble ----------
@@ -276,7 +276,90 @@ def train_and_evaluate(
     X_tr, y_tr = X_all[train_idx], y_all[train_idx]
     X_hd, y_hd = X_all[holdout_idx], y_all[holdout_idx]
 
-    # ---------- XGBoost ----------
+    # ---------- XGBoost baseline for feature selection (if enabled) ----------
+    selected_features = feature_names[:]  # Start with all
+    if params["top_k_features"] > 0 or params["auto_prune"]:
+        # Train baseline model for importances
+        dsub_base = xgb.DMatrix(X_sub, y_sub, feature_names=feature_names)
+        dval_base = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
+        bst_base = xgb.train(
+            {
+                "eval_metric": "aucpr",
+                "learning_rate": params["learning_rate"],
+                "max_depth": params["xgb_max_depth"],
+                "min_child_weight": params["xgb_min_child_weight"],
+                "subsample": params["xgb_subsample"],
+                "colsample_bytree": params["colsample_bytree"],
+                "gamma": params["gamma"],
+                "alpha": params["alpha"],
+                "lambda": params["reg_lambda"],
+                "scale_pos_weight": params["scale_pos_weight"],
+                "tree_method": "hist",
+                "n_jobs": -1,
+                "random_state": params["random_state"],
+            },
+            dsub_base,
+            num_boost_round=3000,
+            evals=[(dval_base, "val")],
+            early_stopping_rounds=params["early_stopping_rounds"],
+            verbose_eval=False,
+            obj=focal_binary_obj,
+        )
+
+        # Compute and log feature importances ('gain' for informativeness)
+        importances = bst_base.get_score(importance_type='gain')
+        sorted_importances = sorted(importances.items(), key=lambda x: x[1], reverse=True)
+        logging.info("Feature importances (gain): %s", sorted_importances)
+
+        if params["top_k_features"] > 0:
+            # Select top K
+            top_k = min(params["top_k_features"], len(sorted_importances))
+            selected_features = [feat for feat, _ in sorted_importances[:top_k]]
+            logging.info("Selected top %d features: %s", top_k, selected_features)
+
+        if params["auto_prune"]:
+            # Iterative pruning: Remove lowest-importance in steps, retrain, check metric drop
+            baseline_pr_auc = auc(*precision_recall_curve(y_val, bst_base.predict(dval_base))[:2])
+            current_features = sorted_importances.copy()
+            while len(current_features) > params["prune_step"]:
+                # Remove lowest prune_step features
+                current_features = current_features[:-params["prune_step"]]
+                selected_feats = [feat for feat, _ in current_features]
+                feat_indices = [feature_names.index(f) for f in selected_feats]
+
+                # Retrain on subset
+                X_sub_prune = X_sub[:, feat_indices]
+                X_val_prune = X_val[:, feat_indices]
+                dsub_prune = xgb.DMatrix(X_sub_prune, y_sub, feature_names=selected_feats)
+                dval_prune = xgb.DMatrix(X_val_prune, y_val, feature_names=selected_feats)
+                bst_prune = xgb.train(
+                    {**bst_base.params},  # Reuse params
+                    dsub_prune,
+                    num_boost_round=3000,
+                    evals=[(dval_prune, "val")],
+                    early_stopping_rounds=params["early_stopping_rounds"],
+                    verbose_eval=False,
+                    obj=focal_binary_obj,
+                )
+
+                # Check PR-AUC drop
+                prune_pr_auc = auc(*precision_recall_curve(y_val, bst_prune.predict(dval_prune))[:2])
+                if baseline_pr_auc - prune_pr_auc > params["metric_tol"]:
+                    logging.info("Pruning stopped: Metric drop exceeded tol (%.4f)", params["metric_tol"])
+                    break
+                baseline_pr_auc = prune_pr_auc  # Update baseline
+
+            selected_features = [feat for feat, _ in current_features]
+            logging.info("Auto-pruned to %d features: %s", len(selected_features), selected_features)
+
+        # Subset data for final training
+        if len(selected_features) < len(feature_names):
+            feat_indices = [feature_names.index(f) for f in selected_features]
+            X_all = X_all[:, feat_indices]
+            feature_names = selected_features
+            logging.info("Feature matrix after selection: %s", X_all.shape)
+
+    # ---------- Final XGBoost on (possibly selected) features ----------
     dsub = xgb.DMatrix(X_sub, y_sub, feature_names=feature_names)
     dval = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
     bst = xgb.train(
@@ -290,6 +373,7 @@ def train_and_evaluate(
             "gamma": params["gamma"],
             "alpha": params["alpha"],
             "lambda": params["reg_lambda"],
+            "scale_pos_weight": params["scale_pos_weight"],
             "tree_method": "hist",
             "n_jobs": -1,
             "random_state": params["random_state"],
@@ -301,6 +385,11 @@ def train_and_evaluate(
         verbose_eval=False,
         obj=focal_binary_obj,
     )
+
+    # Log final importances
+    final_importances = bst.get_score(importance_type='gain')
+    sorted_final = sorted(final_importances.items(), key=lambda x: x[1], reverse=True)
+    logging.info("Final feature importances (gain): %s", sorted_final)
 
     # ---------- calibrate ----------
     dtr, dho = xgb.DMatrix(X_tr, feature_names=feature_names), xgb.DMatrix(
@@ -372,34 +461,35 @@ def main() -> None:
 
     # ───────── Hyper‑parameters ─────────
     hp = parser.add_argument
-    hp("--pca-n", "--pca_n", dest="pca_n", type=int, default=128)
-    hp("--xgb-max-depth", "--xgb_max_depth", dest="xgb_max_depth", type=int, default=7)
+    hp("--pca-n", "--pca_n", dest="pca_n", type=int, default=512)
+    hp("--xgb-max-depth", "--xgb_max_depth", dest="xgb_max_depth", type=int, default=8)
     hp(
         "--xgb-min-child-weight",
         "--xgb_min_child_weight",
         dest="xgb_min_child_weight",
         type=int,
-        default=3,
+        default=10,
     )
     hp(
-        "--xgb-subsample", "--xgb_subsample", dest="xgb_subsample", type=float, default=0.9
+        "--xgb-subsample", "--xgb_subsample", dest="xgb_subsample", type=float, default=1.0
     )
     hp(
         "--learning-rate", "--learning_rate", dest="learning_rate", type=float, default=0.02
     )
-    hp("--gamma", type=float, default=0.10)
+    hp("--gamma", type=float, default=0.3)
     hp(
         "--colsample-bytree",
         "--colsample_bytree",
         dest="colsample_bytree",
         type=float,
-        default=0.9,
+        default=0.7,
     )
-    hp("--alpha", type=float, default=1e-5)
-    hp("--reg-lambda", "--reg_lambda", dest="reg_lambda", type=float, default=2e-5)
+    hp("--alpha", type=float, default=0.0002)
+    hp("--reg-lambda", "--reg_lambda", dest="reg_lambda", type=float, default=0.0001)
     hp(
-        "--focal-gamma", "--focal_gamma", dest="focal_gamma", type=float, default=2.0
+        "--focal-gamma", "--focal_gamma", dest="focal_gamma", type=float, default=1.0
     )
+    hp("--scale-pos-weight", "--scale_pos_weight", dest="scale_pos_weight", type=float, default=5.0)
 
     # ───────── Feature‑selection flags ─────────
     hp(
@@ -447,6 +537,7 @@ def main() -> None:
         alpha=args.alpha,
         reg_lambda=args.reg_lambda,
         focal_gamma=args.focal_gamma,
+        scale_pos_weight=args.scale_pos_weight,
         top_k_features=args.top_k_features,
         auto_prune=auto_prune_flag,
         use_full_data=use_full_flag,

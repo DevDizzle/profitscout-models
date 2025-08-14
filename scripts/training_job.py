@@ -19,34 +19,24 @@ PARAMS = {
     "location":       "us-central1",
     "source_table":   "profit_scout.breakout_features",
 
-    # locked HPs
-    "pca_n": 128,
-    "xgb_max_depth": 7,
-    "xgb_min_child_weight": 3,
-    "xgb_subsample": 0.9,
-    "logreg_c": 0.001,
-    "blend_weight": 0.6,
-    "learning_rate": 0.02,
-    "gamma": 0.10,
-    "colsample_bytree": 0.9,
-    "alpha": 1e-5,
-    "reg_lambda": 2e-5,
-    "focal_gamma": 2.0,
+    # Use trainer defaults for HPs (no overrides here)
 
-    # feature‑selection OFF, full data ON
-    "auto_prune": "false",
+    # Feature selection: Auto-prune on, top_k off, full data off for validation
+    "auto_prune": "true",
     "top_k_features": 0,
-    "use_full_data": "true",
+    "metric_tol": 0.002,
+    "prune_step": 25,
+    "use_full_data": "false",
 }
 
 job = aiplatform.PipelineJob(
-    display_name=f"profitscout-fullfit-{run_stamp}",
+    display_name=f"profitscout-feature-selection-{run_stamp}",
     template_path=PIPELINE_JSON,
     pipeline_root=PIPELINE_ROOT,
     parameter_values=PARAMS,
     enable_caching=False,
 )
 
-job.run(sync=True)   # <-- change False → True
-print("Launched on-demand training job:", job.resource_name)
+job.run(sync=True)
+print("Launched on-demand feature selection job:", job.resource_name)
 print("Logs & artefacts at:", PIPELINE_ROOT)
