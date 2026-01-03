@@ -3,8 +3,9 @@ google-cloud-bigquery
 google-cloud-bigquery-storage
 google-cloud-storage
 pandas
+pandas-ta-classic
 scikit-learn
-xgboost==1.6.2
+xgboost
 joblib
 gcsfs
 cloudml-hypertune

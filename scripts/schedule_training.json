@@ -1,0 +1,27 @@
+{
+  "displayName": "profitscout-weekly-training",
+  "cron": "0 14 * * 0",
+  "maxConcurrentRunCount": "1",
+  "createPipelineJobRequest": {
+    "parent": "projects/profitscout-lx6bb/locations/us-central1",
+    "pipelineJob": {
+      "displayName": "profitscout-weekly-training",
+      "templateUri": "gs://profitscout-lx6bb-pipeline-artifacts/training/training_pipeline.json",
+      "runtimeConfig": {
+        "gcsOutputDirectory": "gs://profitscout-lx6bb-pipeline-artifacts/training",
+        "parameterValues": {
+            "project": "profitscout-lx6bb",
+            "source_table": "profit_scout.price_data",
+            "xgb_max_depth": 6,
+            "learning_rate": 0.06,
+            "xgb_min_child_weight": 12,
+            "xgb_subsample": 0.7,
+            "colsample_bytree": 0.7,
+            "gamma": 2.0,
+            "alpha": 0.5,
+            "reg_lambda": 2.0
+        }
+      }
+    }
+  }
+}

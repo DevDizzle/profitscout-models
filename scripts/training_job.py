@@ -1,4 +1,4 @@
-# FILE: training_job_run_now.py
+# FILE: training_job.py
 from datetime import datetime
 from google.cloud import aiplatform
 
@@ -16,21 +16,21 @@ PIPELINE_ROOT = (
 
 PARAMS = {
     "project":        "profitscout-lx6bb",
-    "location":       "us-central1",
-    "source_table":   "profit_scout.breakout_features",
-
-    # Use trainer defaults for HPs (no overrides here)
-
-    # Feature selection: Auto-prune on, top_k off, full data off for validation
-    "auto_prune": "true",
-    "top_k_features": 0,
-    "metric_tol": 0.002,
-    "prune_step": 25,
-    "use_full_data": "false",
+    "source_table":   "profit_scout.price_data",
+    
+    # Overrides (Optional)
+    "xgb_max_depth": 6,
+    "learning_rate": 0.06,
+    "xgb_min_child_weight": 12,
+    "xgb_subsample": 0.7,
+    "colsample_bytree": 0.7,
+    "gamma": 2.0,
+    "alpha": 0.5,
+    "reg_lambda": 2.0,
 }
 
 job = aiplatform.PipelineJob(
-    display_name=f"profitscout-feature-selection-{run_stamp}",
+    display_name=f"profitscout-training-{run_stamp}",
     template_path=PIPELINE_JSON,
     pipeline_root=PIPELINE_ROOT,
     parameter_values=PARAMS,
@@ -38,5 +38,5 @@ job = aiplatform.PipelineJob(
 )
 
 job.run(sync=True)
-print("Launched on-demand feature selection job:", job.resource_name)
+print("Launched training job:", job.resource_name)
 print("Logs & artefacts at:", PIPELINE_ROOT)

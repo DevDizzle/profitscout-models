@@ -1,88 +1,74 @@
+#!/usr/bin/env python3
+# FILE: hpo_pipeline.py
 """
-Vertex AI pipeline that runs a Hyperparameter-Tuning job
-for the ProfitScout model.
-Requires: pip install -U kfp google-cloud-pipeline-components google-cloud-aiplatform
+Creates a Vertex AI Hyperparameter Tuning Job for the High Gamma Model.
 """
+
+from google.cloud import aiplatform
 from google.cloud.aiplatform import hyperparameter_tuning as hpt
-from google_cloud_pipeline_components.v1.hyperparameter_tuning_job import (
-    HyperparameterTuningJobRunOp,
-    serialize_metrics,
-    serialize_parameters,
-)
-from kfp import dsl, compiler
 
-# ─────────────────── Config ───────────────────
-PROJECT_ID    = "profitscout-lx6bb"
-REGION        = "us-central1"
-PIPELINE_ROOT = f"gs://{PROJECT_ID}-pipeline-artifacts/hpo"
-TRAINER_IMAGE = f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/trainer:latest"
-
-# ─────────────────── Pipeline ───────────────────
-@dsl.pipeline(
-    name="profitscout-hpo-pipeline",
-    description="Final tight HPO sweep (focal loss, no SMOTE).",
-    pipeline_root=PIPELINE_ROOT,
+PROJECT_ID = "profitscout-lx6bb"
+REGION = "us-central1"
+STAGING_BUCKET = f"gs://{PROJECT_ID}-pipeline-artifacts"
+TRAINER_IMAGE_URI = (
+    f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/trainer:latest"
 )
-def hpo_pipeline(
-    project: str = PROJECT_ID,
-    location: str = REGION,
-    source_table: str = "profit_scout.breakout_features",
-    max_trial_count: int = 60,
-    parallel_trial_count: int = 3,
-):
-    # -------- training container spec --------
+
+def create_hpo_job():
+    aiplatform.init(project=PROJECT_ID, location=REGION, staging_bucket=STAGING_BUCKET)
+
+    # Define the custom job spec (what runs in each trial)
     worker_pool_specs = [
         {
-            "machine_spec": {"machine_type": "n1-highmem-8"},
+            "machine_spec": {
+                "machine_type": "n1-standard-16",
+            },
             "replica_count": 1,
             "container_spec": {
-                "image_uri": TRAINER_IMAGE,
+                "image_uri": TRAINER_IMAGE_URI,
                 "args": [
-                    "--project-id", project,
-                    "--source-table", source_table,
-                    "--auto-prune", "false",
-                    "--top-k-features", "0",
-                    "--use-full-data", "false",
+                    "--project-id", PROJECT_ID,
+                    "--source-table", "profit_scout.price_data",
+                    # HPO service will append the tuning args automatically
                 ],
             },
         }
     ]
 
-    # -------- single optimisation metric --------
-    metric_spec = serialize_metrics({"pr_auc": "maximize"})
-
-    # -------- refined search space --------
-    parameter_spec = serialize_parameters({
-        "pca_n":                hpt.DiscreteParameterSpec(values=[256, 512, 768], scale="linear"),
-        "xgb_max_depth":        hpt.IntegerParameterSpec(7, 12, "linear"),
-        "xgb_min_child_weight": hpt.IntegerParameterSpec(8, 12, "linear"),
-        "xgb_subsample":        hpt.DoubleParameterSpec(0.9, 1.0, "linear"),
-        "learning_rate":        hpt.DoubleParameterSpec(0.005, 0.03, "log"),
-        "gamma":                hpt.DoubleParameterSpec(0.3, 0.5, "linear"),
-        "colsample_bytree":     hpt.DoubleParameterSpec(0.6, 0.9, "linear"),
-        "alpha":                hpt.DoubleParameterSpec(1e-5, 5e-4, "log"),
-        "reg_lambda":           hpt.DoubleParameterSpec(1e-6, 1e-4, "log"),
-        "focal_gamma":          hpt.DoubleParameterSpec(1.0, 2.5, "linear"),
-    })
-
-    # -------- HPT job op --------
-    HyperparameterTuningJobRunOp(
-        display_name="profitscout-hpo-job",
-        project=project,
-        location=location,
-        base_output_directory=PIPELINE_ROOT,
+    # Create a CustomJob object for the trials
+    custom_job = aiplatform.CustomJob(
+        display_name="profitscout-hpo-trial", # This is the display name for each trial's CustomJob
         worker_pool_specs=worker_pool_specs,
-        study_spec_metrics=metric_spec,
-        study_spec_parameters=parameter_spec,
-        max_trial_count=max_trial_count,
-        parallel_trial_count=parallel_trial_count,
-        # study_spec_algorithm='BAYESIAN_OPTIMIZATION',  # Optional override
+        project=PROJECT_ID,
+        location=REGION,
     )
 
-# ─────────────────── Compile ───────────────────
-if __name__ == "__main__":
-    compiler.Compiler().compile(
-        pipeline_func=hpo_pipeline,
-        package_path="hpo_pipeline.json",
+    # Define the search space
+    parameter_spec = {
+        "learning-rate": hpt.DoubleParameterSpec(min=0.01, max=0.3, scale="log"),
+        "xgb-max-depth": hpt.IntegerParameterSpec(min=3, max=10, scale="linear"),
+        "xgb-min-child-weight": hpt.IntegerParameterSpec(min=1, max=20, scale="linear"),
+        "xgb-subsample": hpt.DoubleParameterSpec(min=0.5, max=1.0, scale="linear"),
+        "colsample-bytree": hpt.DoubleParameterSpec(min=0.5, max=1.0, scale="linear"),
+        "gamma": hpt.DoubleParameterSpec(min=0.0, max=5.0, scale="linear"),
+        "alpha": hpt.DoubleParameterSpec(min=0.0, max=1.0, scale="linear"),
+        "reg-lambda": hpt.DoubleParameterSpec(min=0.0, max=5.0, scale="linear"),
+    }
+
+    # Create the Tuning Job
+    hpo_job = aiplatform.HyperparameterTuningJob(
+        display_name="profitscout-high-gamma-hpo",
+        custom_job=custom_job,
+        metric_spec={"pr_auc": "maximize"},
+        parameter_spec=parameter_spec,
+        max_trial_count=20,
+        parallel_trial_count=4,
     )
-    print("✓ Compiled hpo_pipeline.json")
+
+    print("Submitting HPO Job...")
+    hpo_job.run(sync=False) # Submit and return (don't block CLI)
+    print(f"HPO Job submitted. Resource name: {hpo_job.resource_name}")
+    print(f"View in Console: https://console.cloud.google.com/vertex-ai/training/hyperparameter-tuning-jobs?project={PROJECT_ID}")
+
+if __name__ == "__main__":
+    create_hpo_job()

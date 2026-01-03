@@ -1,310 +1,256 @@
 #!/usr/bin/env python3
 """
 ProfitScout Batch Prediction Script
-Loads model + preprocessing artifacts from GCS and writes batch predictions to BigQuery.
+Loads model from GCS, generates technical features from raw price data, and predicts High Gamma opportunities.
 """
-
-# ────────────────────────── stdlib / deps ──────────────────────────
 import argparse
-import json
 import logging
 import os
-
-import joblib
-import numpy as np
+import tempfile
+import urllib.parse
 import pandas as pd
+import pandas_ta_classic as ta
 import xgboost as xgb
 from google.cloud import bigquery, storage
 
-# ──────────────────────────── init logging ─────────────────────────
 logging.basicConfig(level=logging.INFO)
 
-# ─────────────────── Feature Definitions (must match trainer) ───────────────────
-EMB_COLS = [
-    "summary_embedding",
+FEATURE_NAMES = [
+    # Trend
+    "sma_10", "sma_20", "sma_50", "sma_200",
+    "ema_10", "ema_50",
+    "adx_14", 
+    "macd_12_26_9", "macdh_12_26_9", "macds_12_26_9",
+    # Momentum
+    "rsi_14", "rsi_5",
+    "stochk_14_3_3", "stochd_14_3_3",
+    "roc_1", "roc_3", "roc_5",
+    # Volatility
+    "atrr_14", "atr_ratio",
+    "bbl_20_2.0", "bbu_20_2.0", "bbb_20_2.0", "bbp_20_2.0",
+    # Volume
+    "obv", "rvol_20", "volume_delta",
+    # Structure/Ratios
+    "price_vs_sma20", "price_vs_sma50", "price_vs_sma200",
+    "dist_from_high", "dist_from_low", "close_loc"
 ]
 
-STATIC_NUM_COLS = [
-    "sentiment_score",
-    "sma_20",
-    "ema_50",
-    "rsi_14",
-    "adx_14",
-    "sma_20_delta",
-    "ema_50_delta",
-    "rsi_14_delta",
-    "adx_14_delta",
-    "eps_surprise",
-]
+import json
 
-ENGINEERED_COLS = [
-    "price_sma20_ratio",
-    "ema50_sma20_ratio",
-    "rsi_centered",
-    "adx_log1p",
-    "sent_rsi",
-    "eps_surprise_isnull",
-]
+def load_threshold(model_dir: str) -> float:
+    """Download and load threshold from GCS."""
+    if not model_dir.startswith("gs://"):
+        return 0.5
+        
+    bucket_name = urllib.parse.urlparse(model_dir).netloc
+    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+    
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(os.path.join(prefix, "threshold.json"))
+    
+    if not blob.exists():
+        logging.warning("threshold.json not found, defaulting to 0.5")
+        return 0.5
+    
+    with tempfile.TemporaryDirectory() as tmp:
+        local_path = os.path.join(tmp, "threshold.json")
+        blob.download_to_filename(local_path)
+        
+        with open(local_path, "r") as f:
+            data = json.load(f)
+            return float(data.get("threshold", 0.5))
 
-for _c in EMB_COLS:
-    _b = _c.replace("_embedding", "")
-    ENGINEERED_COLS.extend([f"{_b}_norm", f"{_b}_mean", f"{_b}_std"])
-
-LDA_COLS = [f"lda_topic_{i}" for i in range(10)]
-
-FINBERT_COLS = [
-    "pos_prob",
-    "neg_prob",
-    "neu_prob",
-]
-
-# ──────────────────────────── Modular Functions ────────────────────────────
-def load_artifacts(model_dir: str):
-    """Download model and artifacts from GCS."""
-    bucket_name, blob_prefix = model_dir.replace("gs://", "").split("/", 1)
-    bucket = storage.Client().bucket(bucket_name)
-
-    # ---- Booster ---------------------------------------------------------
-    if bucket.blob(f"{blob_prefix}/xgb_model.json").exists():
-        local = "xgb_model.json"
-        bucket.blob(f"{blob_prefix}/xgb_model.json").download_to_filename(local)
+def load_model(model_dir: str):
+    """Download and load XGBoost model from GCS."""
+    if not model_dir.startswith("gs://"):
+        raise ValueError("model-dir must start with gs://")
+        
+    bucket_name = urllib.parse.urlparse(model_dir).netloc
+    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+    
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(os.path.join(prefix, "model.json"))
+    
+    with tempfile.TemporaryDirectory() as tmp:
+        local_path = os.path.join(tmp, "model.json")
+        blob.download_to_filename(local_path)
+        
         bst = xgb.Booster()
-        bst.load_model(local)
+        bst.load_model(local_path)
+        return bst
 
-    elif bucket.blob(f"{blob_prefix}/xgb_model.ubj").exists():
-        local = "xgb_model.ubj"
-        bucket.blob(f"{blob_prefix}/xgb_model.ubj").download_to_filename(local)
-        bst = xgb.Booster()
-        bst.load_model(local)
-
-    else:
-        local = "xgb_model.joblib"
-        bucket.blob(f"{blob_prefix}/xgb_model.joblib").download_to_filename(local)
-        bst = joblib.load(local)
-
-    # ---- preprocessing artifacts ----------------------------------------
-    bucket.blob(f"{blob_prefix}/training_artifacts.joblib").download_to_filename(
-        "training_artifacts.joblib"
-    )
-    artifacts = joblib.load("training_artifacts.joblib")
-
-    # ---- PCA map --------------------------------------------------------
-    bucket.blob(f"{blob_prefix}/pca_map.joblib").download_to_filename("pca_map.joblib")
-    pca_map = joblib.load("pca_map.joblib")
-    artifacts["pca_map"] = pca_map  # inject into artifacts
-
-    return bst, artifacts
-
-
-def load_data(project_id: str, source_table: str) -> pd.DataFrame:
-    """Loads prediction data from a BigQuery table."""
-    fq_table = (
-        source_table if source_table.count(".") >= 2 else f"{project_id}.{source_table}"
-    )
-    logging.info(f"Loading prediction data from {fq_table}")
-    df = (
-        bigquery.Client(project=project_id)
-        .query(f"SELECT * FROM {fq_table}")
-        .to_dataframe()
-    )
-    logging.info(f"Loaded {len(df):,} rows for prediction.")
+def load_raw_price_data(project_id: str, source_table: str) -> pd.DataFrame:
+    """Loads raw OHLCV data from BigQuery."""
+    logging.info("Loading raw price data from %s.%s", project_id, source_table)
+    bq = bigquery.Client(project=project_id)
+    
+    query = f"""
+        SELECT ticker, date, open, high, low, adj_close as close, volume
+        FROM `{project_id}.{source_table}`
+        WHERE adj_close IS NOT NULL
+        ORDER BY ticker, date
+    """
+    df = bq.query(query).to_dataframe()
+    
+    df.rename(columns={
+        "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
+    }, inplace=True)
+    
+    df["date"] = pd.to_datetime(df["date"])
+    logging.info("Loaded %d rows", len(df))
     return df
 
-
-def preprocess_for_inference(df: pd.DataFrame, artifacts: dict):
-    """Applies transformations to new data using loaded artifacts."""
-    logging.info("Applying inference transformations…")
-
-    # --- Type correction for embeddings ---
-    for c in EMB_COLS:
-        if c in df.columns and df[c].dtype == "object" and df[c].notna().any():
-            df[c] = df[c].apply(
-                lambda x: np.array(json.loads(x))
-                if isinstance(x, str) and x.startswith("[")
-                else x
-            )
-
-    # --- Winsorize ---
-    for col, (lo, hi) in artifacts["winsor_map"].items():
-        if col in df.columns:
-            df[col] = df[col].clip(lo, hi)
-
-    # --- Fill missing EPS surprise ---
-    df["eps_surprise"] = (
-        df["eps_surprise"]
-        .fillna(df["industry_sector"].map(artifacts["sector_mean_map"]))
-        .fillna(0.0)
-    )
-
-    # --- PCA for embeddings ---
-    X_pca_list = []
-    pca_feature_names: list[str] = []
-    for col in EMB_COLS:
-        if col not in artifacts["pca_map"]:
-            logging.warning(f"No PCA model found for {col}; skipping")
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Generates technical indicators using pandas_ta."""
+    logging.info("Engineering features...")
+    
+    results = []
+    grouped = df.groupby("ticker")
+    
+    for ticker, group in grouped:
+        if len(group) < 50:
             continue
+            
+        g = group.copy().set_index("date").sort_index()
+        
+        # --- Indicators (Must match training exactly) ---
+        g.ta.sma(length=10, append=True)
+        g.ta.sma(length=20, append=True)
+        g.ta.sma(length=50, append=True)
+        g.ta.sma(length=200, append=True)
+        g.ta.ema(length=10, append=True)
+        g.ta.ema(length=50, append=True)
+        g.ta.adx(length=14, append=True)
+        g.ta.macd(fast=12, slow=26, signal=9, append=True)
+        g.ta.rsi(length=14, append=True)
+        g.ta.rsi(length=5, append=True)
+        g.ta.stoch(k=14, d=3, smooth_k=3, append=True)
+        g.ta.roc(length=1, append=True)
+        g.ta.roc(length=3, append=True)
+        g.ta.roc(length=5, append=True)
 
-        pca = artifacts["pca_map"][col]
-        n_comp = pca.n_components_
-        pca_feature_names.extend(f"{col}_pc{i}" for i in range(n_comp))
+        g.ta.atr(length=14, append=True)
+        g.ta.atr(length=3, append=True)
+        if "ATRr_3" in g.columns and "ATRr_14" in g.columns:
+             g["atr_ratio"] = g["ATRr_3"] / g["ATRr_14"]
+        else:
+             g["atr_ratio"] = 1.0
 
-        if col not in df.columns or df[col].dropna().empty:
-            X_pca_list.append(np.full((len(df), n_comp), np.nan))
-            continue
+        g.ta.bbands(length=20, std=2, append=True)
+        g.ta.obv(append=True)
+        
+        vol_sma = g["Volume"].rolling(window=20).mean()
+        g["RVOL_20"] = g["Volume"] / vol_sma
+        g["volume_delta"] = g["Volume"].pct_change()
 
-        valid = df[col].dropna()
-        transformed = np.full((len(df), n_comp), np.nan, dtype=np.float32)
-        transformed[valid.index] = pca.transform(np.vstack(valid.values))
-        X_pca_list.append(transformed)
+        if "SMA_20" in g.columns:
+            g["price_vs_sma20"] = g["Close"] / g["SMA_20"]
+        if "SMA_50" in g.columns:
+            g["price_vs_sma50"] = g["Close"] / g["SMA_50"]
+        if "SMA_200" in g.columns:
+            g["price_vs_sma200"] = g["Close"] / g["SMA_200"]
+        
+        g["dist_from_high"] = (g["High"] - g["Close"]) / g["Close"]
+        g["dist_from_low"]  = (g["Close"] - g["Low"]) / g["Close"]
+        
+        denom = (g["High"] - g["Low"])
+        g["close_loc"] = (g["Close"] - g["Low"]) / denom
+        g.loc[denom == 0, "close_loc"] = 0.5
 
-    X_pca = np.hstack(X_pca_list) if X_pca_list else np.empty((len(df), 0), np.float32)
+        g["ticker"] = ticker
+        
+        # Return all days where we have valid features
+        results.append(g)
 
-    # --- numeric features ---
-    final_num_cols = [
-        c
-        for c in (
-            STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS
-        )
-        if c in df.columns
-    ]
-    X_num = df[final_num_cols].to_numpy(dtype=np.float32)
+    if not results:
+        return pd.DataFrame()
+        
+    full_df = pd.concat(results).reset_index()
+    full_df.columns = [c.lower() for c in full_df.columns]
+    
+    # Cast features to float32 to ensure DMatrix compatibility
+    import numpy as np
+    for col in FEATURE_NAMES:
+        full_df[col] = pd.to_numeric(full_df[col], errors='coerce').astype('float32')
+        
+    # Replace infs with nan
+    full_df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    feature_names = pca_feature_names + final_num_cols
-    X_all = np.hstack([X_pca, X_num]).astype(np.float32)
-
-    # Log feature stats
-    logging.info(f"X_all shape: {X_all.shape}")
-    non_nan_counts = np.sum(~np.isnan(X_all), axis=0)
-    all_zero_cols = [
-        feature_names[i]
-        for i in range(X_all.shape[1])
-        if np.all(X_all[:, i] == 0)
-    ]
-    logging.info(
-        f"Non-NaN per column (min/mean/max): "
-        f"{non_nan_counts.min()}/{non_nan_counts.mean():.1f}/{non_nan_counts.max()}"
-    )
-    logging.info(f"All-zero columns: {all_zero_cols if all_zero_cols else 'None'}")
-
-    # For embeddings specifically
-    for col in EMB_COLS:
-        if col in df.columns:
-            valid_count = df[col].notna().sum()
-            if valid_count > 0:
-                emb_lens = df[col].dropna().apply(
-                    lambda x: len(x) if isinstance(x, np.ndarray) else 0
-                )
-                logging.info(
-                    f"{col}: valid rows={valid_count}, "
-                    f"len min/mean/max={emb_lens.min()}/{emb_lens.mean():.1f}/{emb_lens.max()}"
-                )
-
-    # --- Sanity check before imputation ---
-    expected_n = artifacts["imputer"].n_features_in_
-    actual_n = X_all.shape[1]
-
-    if actual_n != expected_n:
-        logging.error(
-            "Feature count mismatch: expected %d, got %d", expected_n, actual_n
-        )
-        logging.info("Feature names passed to imputer:\n%s", feature_names)
-        raise ValueError(
-            f"Feature mismatch: expected {expected_n} features, got {actual_n}"
-        )
-
-    # --- Impute ---
-    X_imp = artifacts["imputer"].transform(X_all)
-
-    return X_imp, feature_names
-
-
-def make_predictions(bst, artifacts: dict, X_imp: np.ndarray, feature_names: list):
-    """Generates calibrated predictions."""
-    logging.info("Generating predictions…")
-
-    dpred = xgb.DMatrix(X_imp, feature_names=feature_names)
-
-    # Get XGBoost probabilities consistently
-    if isinstance(bst, xgb.Booster):
-        xgb_logit = bst.predict(dpred)
-        xgb_prob = 1 / (1 + np.exp(-xgb_logit))
-    else:  # Assume XGBClassifier or similar
-        xgb_prob = bst.predict_proba(dpred)[:, 1]
-
-    prob = artifacts["calibrator"].transform(xgb_prob)
-    preds = (prob >= artifacts["threshold"]).astype(int)
-
-    # Add these logs
-    logging.info(f"XGBoost probs: min={xgb_prob.min():.4f}, max={xgb_prob.max():.4f}, mean={xgb_prob.mean():.4f}")
-    logging.info(f"Calibrated probs: min={prob.min():.4f}, max={prob.max():.4f}, mean={prob.mean():.4f}")
-
-    return pd.DataFrame({
-        "xgb_probability": xgb_prob,
-        "calibrated_probability": prob,
-        "prediction": preds,
-    })
+    # Keep rows only where we have all features
+    full_df.dropna(subset=FEATURE_NAMES, inplace=True)
+    
+    # Filter for the latest date per ticker for inference
+    full_df = full_df.sort_values("date").groupby("ticker").tail(1)
+    
+    return full_df
 
 def save_predictions(df: pd.DataFrame, project_id: str, destination_table: str):
-    """Saves the predictions back to a BigQuery table."""
-    logging.info(f"Saving {len(df):,} predictions to {project_id}.{destination_table}")
+    """Saves predictions to BigQuery."""
+    logging.info("Saving %d predictions to %s", len(df), destination_table)
+    
+    out_df = df[["ticker", "date", "close", "prob", "prediction"]].copy()
+    
     job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE",
+        write_disposition="WRITE_TRUNCATE", 
         schema=[
             bigquery.SchemaField("ticker", "STRING"),
-            bigquery.SchemaField("quarter_end_date", "DATE"),
-            bigquery.SchemaField("earnings_call_date", "DATE"),
-            bigquery.SchemaField("xgb_probability", "FLOAT64"),
-            bigquery.SchemaField("calibrated_probability", "FLOAT64"),
+            bigquery.SchemaField("date", "DATE"),
+            bigquery.SchemaField("close", "FLOAT64"),
+            bigquery.SchemaField("prob", "FLOAT64"),
             bigquery.SchemaField("prediction", "INTEGER"),
         ],
     )
-    bigquery.Client(project=project_id).load_table_from_dataframe(
-        df, destination_table, job_config=job_config
-    ).result()
-    logging.info("Predictions saved successfully.")
+    
+    client = bigquery.Client(project=project_id)
+    table_ref = f"{project_id}.{destination_table}" if destination_table.count(".") == 1 else destination_table
+    
+    client.load_table_from_dataframe(out_df, table_ref, job_config=job_config).result()
+    logging.info("Save complete.")
 
-
-def main() -> None:
-    """Entry-point for batch prediction."""
+def main():
     parser = argparse.ArgumentParser()
-
-    # ───────── required parameters ─────────
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--source-table", required=True)
     parser.add_argument("--destination-table", required=True)
     parser.add_argument("--model-dir", required=True)
-
-    # ───────── optional / ignored in inference ─────────
+    
+    # Compat flags
     parser.add_argument("--top-k-features", default="0")
     parser.add_argument("--auto-prune", default="false")
-    parser.add_argument("--metric-tol", default="0.002")
-    parser.add_argument("--prune-step", default="25")
-
-    # Ignore any *unknown* CLI flags gracefully.
+    
     args, _ = parser.parse_known_args()
-
-    # ------------------------ run pipeline ------------------------
-    bst, artifacts = load_artifacts(args.model_dir)
-    df_source = load_data(args.project_id, args.source_table)
-
-    if df_source.empty:
-        logging.info("No rows to predict on – exiting.")
+    
+    # 1. Load Data
+    raw_df = load_raw_price_data(args.project_id, args.source_table)
+    
+    # 2. Engineer Features
+    feat_df = engineer_features(raw_df)
+    if feat_df.empty:
+        logging.warning("No valid features generated.")
         return
-
-    X_imp, feat_names = preprocess_for_inference(df_source, artifacts)
-    df_preds = make_predictions(bst, artifacts, X_imp, feat_names)
-
-    df_out = pd.concat(
-        [
-            df_source[
-                ["ticker", "quarter_end_date", "earnings_call_date"]
-            ].reset_index(drop=True),
-            df_preds,
-        ],
-        axis=1,
-    )
-    save_predictions(df_out, args.project_id, args.destination_table)
-
+        
+    # 3. Load Model & Threshold
+    bst = load_model(args.model_dir)
+    threshold = load_threshold(args.model_dir)
+    logging.info("Using probability threshold: %f", threshold)
+    
+    # 4. Predict
+    dmatrix = xgb.DMatrix(feat_df[FEATURE_NAMES])
+    probs = bst.predict(dmatrix) 
+    
+    feat_df["prob"] = probs
+    feat_df["prediction"] = (probs >= threshold).astype(int) 
+    
+    # Strategy: "Top Picks"
+    # Instead of filtering purely by threshold (which causes empty days),
+    # we take the Top 50 setups by probability.
+    # The 'prediction' column tells us if it met the "Sniper" standard.
+    top_picks_df = feat_df.sort_values("prob", ascending=False).head(50).copy()
+    
+    # 5. Save
+    save_predictions(top_picks_df, args.project_id, args.destination_table)
 
 if __name__ == "__main__":
     main()

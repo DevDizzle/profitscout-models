@@ -1,4 +1,4 @@
-"""Cloud Run service that generates features from transcript events."""
+"""Cloud Run service that generates technical features from price data events."""
 
 import os
 import json

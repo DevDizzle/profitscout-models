@@ -1,89 +1,90 @@
 #!/usr/bin/env python3
+# FILE: inference_pipeline.py
 """
-Vertex AI pipeline that
-  1) builds a prediction batch in BigQuery
-  2) runs a custom‑container job to score it
-  gcloud builds submit --tag us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/predictor:latest .
+Compiles the ProfitScout Batch Prediction Pipeline.
 """
 
-import os
-import subprocess
 from kfp import dsl, compiler
-from google_cloud_pipeline_components.v1.bigquery import BigqueryQueryJobOp
-from google_cloud_pipeline_components.v1.custom_job import CustomTrainingJobOp
+from google_cloud_pipeline_components.v1.custom_job import (
+    create_custom_training_job_from_component,
+)
+import subprocess
+import os
 
-# ───────── config ─────────
-PROJECT_ID  = "profitscout-lx6bb"
-REGION      = "us-central1"
-
-PIPELINE_ROOT   = f"gs://{PROJECT_ID}-pipeline-artifacts/inference"
-PREDICTOR_IMAGE = (
+# ─────────────────── Config ───────────────────
+PROJECT_ID = "profitscout-lx6bb"
+REGION = "us-central1"
+PIPELINE_ROOT = f"gs://{PROJECT_ID}-pipeline-artifacts/inference"
+PREDICTOR_IMAGE_URI = (
     f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/predictor:latest"
 )
+# Note: Inference doesn't typically output a model artifact, but CustomJob reqs a base_output_dir
+BASE_OUTPUT_DIR = f"{PIPELINE_ROOT}/job-output"
 
-DATASET               = "profit_scout"
-FEATURES_TBL          = f"{DATASET}.breakout_features"
-PREDICTION_INPUT_TBL  = f"{PROJECT_ID}.{DATASET}.prediction_input"
-PREDICTION_OUTPUT_TBL = f"{PROJECT_ID}.{DATASET}.predictions"
+# ───────────────── Component ─────────────────
+@dsl.container_component
+def prediction_task(
+    project: str,
+    source_table: str,
+    destination_table: str,
+    model_dir: str,
+) -> dsl.ContainerSpec:
+    return dsl.ContainerSpec(
+        image=PREDICTOR_IMAGE_URI,
+        command=["python3", "main.py"],
+        args=[
+            "--project-id", project,
+            "--source-table", source_table,
+            "--destination-table", destination_table,
+            "--model-dir", model_dir,
+        ],
+    )
 
-# ───────── pipeline ─────────
+# Using create_custom_training_job_from_component allows us to run this as a "Custom Job"
+# even though it's inference. This is often cheaper/simpler than BatchPredictionJob 
+# if we have custom logic (like feature engineering inside the container).
+prediction_op = create_custom_training_job_from_component(
+    component_spec=prediction_task,
+    display_name="profitscout-batch-prediction",
+    machine_type="n1-standard-8",
+    replica_count=1,
+    base_output_directory=BASE_OUTPUT_DIR,
+)
+
+# ───────────────── Pipeline ─────────────────
 @dsl.pipeline(
-    name="profitscout-custom-batch-inference",
+    name="profitscout-daily-prediction-pipeline",
+    description="Generate High Gamma predictions for all tickers.",
     pipeline_root=PIPELINE_ROOT,
 )
 def inference_pipeline(
-    project:  str = PROJECT_ID,
-    location: str = REGION,
-    model_version_dir: str = f"gs://{PROJECT_ID}-pipeline-artifacts/training/model-artifacts",
+    project: str = PROJECT_ID,
+    source_table: str = "profit_scout.price_data",
+    destination_table: str = "profit_scout.daily_predictions",
+    model_dir: str = "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts/latest", # User should update this default
 ):
-    stage_batch = BigqueryQueryJobOp(
+    prediction_op(
         project=project,
-        location=location,
-        query=f"""
-            CREATE OR REPLACE TABLE `{PREDICTION_INPUT_TBL}` AS
-            SELECT *
-            FROM   `{project}.{FEATURES_TBL}`
-            WHERE  max_close_30d IS NULL
-        """,
+        source_table=source_table,
+        destination_table=destination_table,
+        model_dir=model_dir,
     )
 
-    CustomTrainingJobOp(
-        display_name="profitscout-prediction-job",
-        project=project,
-        location=location,
-        worker_pool_specs=[{
-            "machine_spec":  {"machine_type": "n1-standard-4"},
-            "replica_count": 1,
-            "container_spec": {
-                "image_uri": PREDICTOR_IMAGE,
-                "args": [
-                    "--project-id",         project,
-                    "--source-table",       f"{DATASET}.prediction_input",
-                    "--destination-table",  PREDICTION_OUTPUT_TBL,
-                    "--model-dir",          model_version_dir,
-                ],
-            },
-        }],
-    ).after(stage_batch)
-
-# ───────── compile ─────────
+# ───────────────── Compile and Upload ─────────────────
 if __name__ == "__main__":
     local_path = "pipelines/compiled/inference_pipeline.json"
-    gcs_path   = f"{PIPELINE_ROOT}/inference_pipeline.json"
+    gcs_path = f"{PIPELINE_ROOT}/inference_pipeline.json"
 
-    # Ensure local folder exists
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-    # Compile the pipeline
     compiler.Compiler().compile(
         pipeline_func=inference_pipeline,
         package_path=local_path,
     )
     print(f"✓ Compiled to {local_path}")
 
-    # Upload to GCS
     try:
         subprocess.run(["gsutil", "cp", local_path, gcs_path], check=True)
         print(f"✓ Uploaded to {gcs_path}")
     except subprocess.CalledProcessError as e:
-        print(f"✗ Failed to upload to GCS: {e}")
+        print(f"✗ GCS upload failed: {e}")

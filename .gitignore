@@ -1,2 +1,11 @@
 # Python virtual environment
 .venv/
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Context & Documentation (Local)
+LINKEDIN_BRIEF.md
+NEXT_STEPS.md
+refactor_plan.md

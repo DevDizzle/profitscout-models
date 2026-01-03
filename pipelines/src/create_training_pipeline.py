@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # FILE: training_pipeline.py
+"""
+Compiles the ProfitScout High-Gamma Training Pipeline.
+"""
 
 from kfp import dsl, compiler
 from google_cloud_pipeline_components.v1.custom_job import (
@@ -22,22 +25,15 @@ MODEL_ARTIFACT_DIR = f"{PIPELINE_ROOT}/model-artifacts"
 def training_task(
     project: str,
     source_table: str,
-    pca_n: int,
     xgb_max_depth: int,
+    learning_rate: float,
     xgb_min_child_weight: int,
     xgb_subsample: float,
-    learning_rate: float,
-    gamma: float,
     colsample_bytree: float,
+    gamma: float,
     alpha: float,
     reg_lambda: float,
-    focal_gamma: float,
     scale_pos_weight: float,
-    top_k_features: int,
-    auto_prune: str,
-    metric_tol: float,
-    prune_step: int,
-    use_full_data: str,
 ) -> dsl.ContainerSpec:
     return dsl.ContainerSpec(
         image=TRAINER_IMAGE_URI,
@@ -45,28 +41,21 @@ def training_task(
         args=[
             "--project-id", project,
             "--source-table", source_table,
-            "--pca-n", pca_n,
             "--xgb-max-depth", xgb_max_depth,
+            "--learning-rate", learning_rate,
             "--xgb-min-child-weight", xgb_min_child_weight,
             "--xgb-subsample", xgb_subsample,
-            "--learning-rate", learning_rate,
-            "--gamma", gamma,
             "--colsample-bytree", colsample_bytree,
+            "--gamma", gamma,
             "--alpha", alpha,
             "--reg-lambda", reg_lambda,
-            "--focal-gamma", focal_gamma,
             "--scale-pos-weight", scale_pos_weight,
-            "--top-k-features", top_k_features,
-            "--auto-prune", auto_prune,
-            "--metric-tol", metric_tol,
-            "--prune-step", prune_step,
-            "--use-full-data", use_full_data,
         ],
     )
 
 training_op = create_custom_training_job_from_component(
     component_spec=training_task,
-    display_name="profitscout-training-job",
+    display_name="profitscout-high-gamma-training-job",
     machine_type="n1-standard-16",
     replica_count=1,
     base_output_directory=MODEL_ARTIFACT_DIR,
@@ -74,50 +63,35 @@ training_op = create_custom_training_job_from_component(
 
 # ───────────────── Pipeline ─────────────────
 @dsl.pipeline(
-    name="profitscout-standard-training-pipeline",
-    description="Train and save ProfitScout model artifacts with HPO‑selected hyperparameters and optional feature selection.",
+    name="profitscout-high-gamma-training-pipeline",
+    description="Train High Gamma Classification Model (XGBoost) on Vertex AI.",
     pipeline_root=PIPELINE_ROOT,
 )
 def training_pipeline(
     project: str = PROJECT_ID,
-    location: str = REGION,
-    source_table: str = "profit_scout.breakout_features",
-    pca_n: int = 512,
-    xgb_max_depth: int = 8,
-    xgb_min_child_weight: int = 10,
-    xgb_subsample: float = 1.0,
-    learning_rate: float = 0.02,
-    gamma: float = 0.3,
+    source_table: str = "profit_scout.price_data",
+    xgb_max_depth: int = 6,
+    learning_rate: float = 0.06,
+    xgb_min_child_weight: int = 12,
+    xgb_subsample: float = 0.7,
     colsample_bytree: float = 0.7,
-    alpha: float = 0.0002,
-    reg_lambda: float = 0.0001,
-    focal_gamma: float = 1.0,
-    scale_pos_weight: float = 5.0,
-    top_k_features: int = 0,
-    auto_prune: str = "false",
-    metric_tol: float = 0.002,
-    prune_step: int = 25,
-    use_full_data: str = "false",
+    gamma: float = 2.0,
+    alpha: float = 0.5,
+    reg_lambda: float = 2.0,
+    scale_pos_weight: float = 0.0, # 0.0 = auto
 ):
     training_op(
         project=project,
         source_table=source_table,
-        pca_n=pca_n,
         xgb_max_depth=xgb_max_depth,
+        learning_rate=learning_rate,
         xgb_min_child_weight=xgb_min_child_weight,
         xgb_subsample=xgb_subsample,
-        learning_rate=learning_rate,
-        gamma=gamma,
         colsample_bytree=colsample_bytree,
+        gamma=gamma,
         alpha=alpha,
         reg_lambda=reg_lambda,
-        focal_gamma=focal_gamma,
         scale_pos_weight=scale_pos_weight,
-        top_k_features=top_k_features,
-        auto_prune=auto_prune,
-        metric_tol=metric_tol,
-        prune_step=prune_step,
-        use_full_data=use_full_data,
     )
 
 # ───────────────── Compile and Upload ─────────────────
@@ -125,7 +99,6 @@ if __name__ == "__main__":
     local_path = "pipelines/compiled/training_pipeline.json"
     gcs_path = f"{PIPELINE_ROOT}/training_pipeline.json"
 
-    # ✅ Ensure local directory exists
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
     compiler.Compiler().compile(

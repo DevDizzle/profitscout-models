@@ -1,198 +1,74 @@
-# ProfitScout ML Pipeline
+# ProfitScout: High Gamma Trading System
 
-![Python](https://img.shields.io/badge/Python-3.11-blue.svg)
-![Google Cloud](https://img.shields.io/badge/Google_Cloud-4285F4?logo=googlecloud&logoColor=white)
-![Vertex AI](https://img.shields.io/badge/Vertex_AI-4285F4?logo=googlecloud&logoColor=white)
-![BigQuery](https://img.shields.io/badge/BigQuery-4285F4?logo=googlecloud&logoColor=white)
-![Cloud Run](https://img.shields.io/badge/Cloud_Run-4285F4?logo=googlecloud&logoColor=white)
-![Cloud Functions](https://img.shields.io/badge/Cloud_Functions-4285F4?logo=googlecloud&logoColor=white)
-![XGBoost](https://img.shields.io/badge/XGBoost-0066CC.svg?logo=xgboost&logoColor=white)
-![Pandas](https://img.shields.io/badge/pandas-150458.svg?logo=pandas&logoColor=white)
-![Scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E.svg?logo=scikit-learn&logoColor=white)
+ProfitScout is an autonomous machine learning system designed to identify stocks poised for **explosive, short-term price moves** (High Gamma). Unlike traditional "trend following" systems, it ignores slow movers and specifically targets volatility velocity.
 
-## 1. Project Overview
+**Target:** `(Next_Day_Close - Close) > 0.5 * ATR(14)`  
+**Philosophy:** "Buy Volatility, Sell Velocity."
 
-The **ProfitScout ML Pipeline** is an end-to-end, serverless system on Google Cloud that predicts short-term stock price movements after quarterly earnings calls.
+---
 
-* **Ingests** earnings call transcripts.
-* **Engineers** rich features using NLP, sentiment analysis, technical indicators, and fundamental surprises.
-* **Orchestrates** a full ML lifecycle in Vertex AI—training, model registry, and batch prediction—showcasing production-grade MLOps.
+## 🎯 The "Sniper" Methodology
 
-***
+The core innovation of ProfitScout is its **Dynamic Thresholding** system. Most models choke on market noise because they force a prediction for every stock, every day. ProfitScout operates differently:
 
-## 2. Architecture
+1.  **Strict Filtering:** The model is trained to recognize the "perfect setup."
+2.  **The "Top 1%" Rule:** During training, we calculate the probability threshold required to be in the **Top 100** highest-confidence historical trades.
+    *   *Current Threshold:* **0.814** (81.4% Confidence)
+3.  **Actionable Precision:**
+    *   **Baseline Precision (Random Guess):** ~12%
+    *   **ProfitScout Precision (at Threshold):** **~36%**
+    *   *Implication:* When the model pulls the trigger, the odds of a massive (>0.5 ATR) move trip by **3x**.
 
-The project is composed of two main parts: an **Event-Driven Processing** pipeline for data ingestion and feature engineering and an **ML Lifecycle** pipeline for training and prediction.
+### The "Daily 50"
+Every evening, the system scans the entire market (~1,500 tickers) and delivers a ranked list of the **Top 50** setups.
+*   **Tier 1 (Sniper):** Probability > 0.814. These are the "Fat Pitches."
+*   **Tier 2 (Watchlist):** Top ranked but < 0.814. Good setups, but require manual confirmation.
 
-```mermaid
-graph TD
-  subgraph "Event-Driven Processing"
-    A[GCS: New Earnings Call Transcript] -->|Event Trigger| B(Cloud Function: discovery)
-    B -->|Pub/Sub| C(Cloud Run: feature-engineering)
-    C -->|Pub/Sub| D(Cloud Run: loader)
-    D -->|Stream| E[BigQuery: Staging Table]
-    F[Cloud Scheduler] -->|Invoke| G(Cloud Function: merger)
-    E -->|Merge| H[BigQuery: Feature Store]
-  end
+---
 
-  subgraph "ML Lifecycle (Vertex AI Orchestrated)"
-    I(Vertex AI Pipeline) -->|1️⃣ Triggers| J(Custom Training Job)
-    H -->|Input Data| J
-    J -->|Model Artifact| K[GCS Bucket]
-    I -->|2️⃣ Import & Register| L(Vertex AI Model Registry)
-    K --> L
-    I -->|3️⃣ Batch Predict| M(Batch Prediction Job)
-    L -->|Registered Model| M
-    H -->|Prediction Data| M
-    M -->|Writes| N[BigQuery: Prediction Table]
-  end
-```
+## 🧠 The Brain: XGBoost & Features
 
-***
+The model does not care about "company fundamentals." It only cares about **Price Structure** and **Velocity**.
 
-## 3. Repository Structure
+### Key Drivers (Feature Importance)
+1.  **Close Location Value (CLV):** Where did the price close relative to the day's High/Low?
+    *   *Signal:* A close near the High suggests institutional buying into the close.
+2.  **Distance from Low:** How far has it already moved?
+3.  **Momentum:** ROC (Rate of Change) 1, 3, 5 days.
+4.  **Volatility Compression:** Bollinger Band Width & ATR Ratio.
 
-```
-profitscout-models/
-│
-├── pipelines/
-│   ├── compiled/
-│   │   ├── training_pipeline.json
-│   │   ├── inference_pipeline.json
-│   │   └── hpo_pipeline.json
-│   └── src/
-│       ├── create_training_pipeline.py
-│       ├── create_inference_pipeline.py
-│       └── create_hpo_pipeline.py
-│
-├── src/
-│   ├── training/
-│   │   ├── main.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── prediction/
-│   │   ├── main.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── feature_engineering/
-│   │   ├── main.py
-│   │   ├── processing.py
-│   │   ├── Dockerfile
-│   │   └── requirements.txt
-│   ├── ingestion/
-│   │   ├── discovery/
-│   │   │   ├── main.py
-│   │   │   └── requirements.txt
-│   │   └── loader/
-│   │       ├── main.py
-│   │       └── requirements.txt
-│   └── data_management/
-│       ├── merger/
-│       │   ├── main.py
-│       │   └── requirements.txt
-│       └── update_max_close/
-│           ├── main.py
-│           └── requirements.txt
-│
-├── scripts/
-│   ├── training_job.py
-│   ├── inference_job.py
-│   └── backfill_features.py
-│
-└── README.md
-```
+*Note: The model has "learned" that a strong close (CLV > 0.8) combined with rising short-term momentum (ROC) is the single best predictor of a gap-up or continuation.*
 
-***
+---
 
-## 4. Getting Started
+## ⚙️ Automated Workflow
 
-### Prerequisites
+The system runs autonomously on Google Cloud Vertex AI.
 
-* gcloud SDK configured
-* A GCP project with the following APIs enabled:
-    * Cloud Functions
-    * Cloud Run
-    * Artifact Registry
-    * BigQuery
-    * Vertex AI
+### 1. Daily Inference (Mon-Fri @ 6:30 PM EST)
+*   **Trigger:** Market Close.
+*   **Process:**
+    1.  Loads fresh OHLCV data from BigQuery.
+    2.  Engineers features for the *latest* trading day.
+    3.  Applies the "Golden" model and thresholds.
+    4.  Saves the **Top 50** picks to BigQuery: `profit_scout.daily_predictions`.
 
-### Setup & Deployment
+### 2. Weekly Retraining (Sun @ 9:00 AM EST)
+*   **Trigger:** Weekly Reset.
+*   **Process:**
+    1.  Retrains the model on the absolute latest data (capturing new market regimes).
+    2.  Recalculates the "Sniper Threshold" based on recent performance.
+    3.  **Promotes** the new model to the production environment automatically.
 
-1.  **Clone the Repository**
+---
 
-    ```bash
-    git clone https://github.com/devdizzle/profitscout-models.git
-    cd profitscout-models
-    ```
+## 📊 Results & Performance
 
-2.  **Build and Push Container Images**
+| Metric | Value | Meaning |
+| :--- | :--- | :--- |
+| **Target** | `> 0.5 * ATR` | Predicting massive, tradable volatility. |
+| **PR-AUC** | `0.22` | Area Under the Precision-Recall Curve (Global). |
+| **Precision @ 100** | **0.36** | **Win rate for the Top 100 predictions.** |
+| **Risk/Reward** | **High** | Winners typically pay 3:1 or 4:1 due to the magnitude of the move. |
 
-    Replace `YOUR_PROJECT` and `YOUR_REPO` with your GCP project ID and Artifact Registry repository name.
-
-    ```bash
-    gcloud builds submit src/training --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/trainer:latest
-    gcloud builds submit src/prediction --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/predictor:latest
-    gcloud builds submit src/feature_engineering --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/feature-engineering:latest
-    gcloud builds submit src/ingestion/loader --tag us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/loader:latest
-    ```
-
-3.  **Deploy Ingestion Services**
-
-    Replace `YOUR_BUCKET`, `YOUR_PROJECT`, and `YOUR_DATASET` with your GCS bucket name, GCP project ID, and BigQuery dataset name.
-
-    ```bash
-    # Cloud Function: discovery
-    gcloud functions deploy discover_new_summary --gen2 --runtime python311 \
-        --trigger-resource YOUR_BUCKET \
-        --trigger-event google.storage.object.finalize \
-        --region us-central1 \
-        --source src/ingestion/discovery
-
-    # Cloud Run: feature-engineering
-    gcloud run deploy feature-engineering \
-        --image us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/feature-engineering:latest \
-        --region us-central1
-
-    # Cloud Run: loader
-    gcloud run deploy loader \
-        --image us-central1-docker.pkg.dev/YOUR_PROJECT/YOUR_REPO/loader:latest \
-        --region us-central1 \
-        --set-env-vars DESTINATION_TABLE=YOUR_DATASET.staging_table
-
-    # Cloud Function: merger (scheduled)
-    gcloud functions deploy merge_staging_to_final --gen2 --runtime python311 \
-        --trigger-topic merge-features \
-        --region us-central1 \
-        --set-env-vars PROJECT_ID=YOUR_PROJECT,STAGING_TABLE=YOUR_DATASET.staging_table,FINAL_TABLE=YOUR_DATASET.feature_store \
-        --source src/data_management/merger
-    ```
-
-4.  **Compile and Run the Pipelines**
-
-    You can compile the pipelines using the provided scripts and then run them using the gcloud CLI.
-
-    ```bash
-    # Compile the pipelines
-    python pipelines/src/create_training_pipeline.py
-    python pipelines/src/create_inference_pipeline.py
-    python pipelines/src/create_hpo_pipeline.py
-
-    # Run a pipeline
-    gcloud ai pipelines run --pipeline-file pipelines/compiled/training_pipeline.json \
-        --region us-central1 \
-        --project YOUR_PROJECT
-    ```
-
-***
-
-## 5. How to Run the Pipeline
-
-### Data Processing (Automated)
-
-Upload a new `.txt` transcript to `gs://<BUCKET>/earnings-call-summaries/`. The event-driven architecture will automatically ingest the data and engineer the features.
-
-### ML Training & Prediction (Manual or Scheduled)
-
-You can manually trigger a pipeline run using the gcloud CLI, as shown in the setup instructions, or you can schedule pipeline runs using Cloud Scheduler.
-
-To run a different pipeline, simply change the `--pipeline-file` argument to point to the desired pipeline JSON file (e.g., `inference_pipeline.json` or `hpo_pipeline.json`).
+*Status: Fully Operational. Inference and Training schedules are active.*

@@ -1,0 +1,21 @@
+{
+  "displayName": "profitscout-daily-inference",
+  "cron": "30 23 * * 1-5",
+  "maxConcurrentRunCount": "1",
+  "createPipelineJobRequest": {
+    "parent": "projects/profitscout-lx6bb/locations/us-central1",
+    "pipelineJob": {
+      "displayName": "profitscout-daily-inference",
+      "templateUri": "gs://profitscout-lx6bb-pipeline-artifacts/inference/inference_pipeline.json",
+      "runtimeConfig": {
+        "gcsOutputDirectory": "gs://profitscout-lx6bb-pipeline-artifacts/inference",
+        "parameterValues": {
+            "project": "profitscout-lx6bb",
+            "source_table": "profit_scout.price_data",
+            "destination_table": "profit_scout.daily_predictions",
+            "model_dir": "gs://profitscout-lx6bb-pipeline-artifacts/production/model"
+        }
+      }
+    }
+  }
+}

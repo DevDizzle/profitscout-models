@@ -1,629 +1,516 @@
 #!/usr/bin/env python3
-""" ProfitScout training script – Vertex AI‑ready, HPO‑friendly.
-• Accepts either hyphen or underscore CLI flags (Vertex passes underscores).
-• Saves model + preprocessing artifacts back to GCS.
-• 2025‑07‑26 update: logs pr_auc, f1, recall_at_prec05, and brier to Cloud Logging and Hyperparameter‑Tuning Trials.
+"""
+ProfitScout Training Script - High Gamma Options Strategy
+Target: Next Day Price Move > 0.5 * ATR(14)
 """
 import argparse
-import gc
-import json
 import logging
 import os
 import tempfile
 import urllib.parse
-import joblib
+import gc
+import sys
 import hypertune
-import numpy as np
 import pandas as pd
+import pandas_ta_classic as ta
 import xgboost as xgb
 from google.cloud import aiplatform, bigquery, storage
-from sklearn.decomposition import PCA
-from sklearn.impute import SimpleImputer
-from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
-    auc,
-    precision_recall_curve,
-    f1_score,
     brier_score_loss,
+    average_precision_score
 )
 
-# ───────────────────────────── Config ─────────────────────────────
 logging.basicConfig(level=logging.INFO)
 
-EMB_COLS = [
-    "summary_embedding",
+# ───────────────────────────── Config ─────────────────────────────
+
+FEATURE_NAMES = [
+    # Trend
+    "sma_10", "sma_20", "sma_50", "sma_200",
+    "ema_10", "ema_50",
+    "adx_14", 
+    "macd_12_26_9", "macdh_12_26_9", "macds_12_26_9",
+    # Momentum
+    "rsi_14", "rsi_5",  # Added RSI 5
+    "stochk_14_3_3", "stochd_14_3_3",
+    "roc_1", "roc_3", "roc_5", # Added ROC
+    # Volatility
+    "atrr_14", "atr_ratio", # Added ATR Ratio
+    "bbl_20_2.0", "bbu_20_2.0", "bbb_20_2.0", "bbp_20_2.0",
+    # Volume
+    "obv", "rvol_20", "volume_delta", # Added Volume Delta
+    # Structure/Ratios
+    "price_vs_sma20", "price_vs_sma50", "price_vs_sma200",
+    "dist_from_high", "dist_from_low", "close_loc" # Added Close Location
 ]
 
-STATIC_NUM_COLS = [
-    "sentiment_score",
-    "sma_20",
-    "ema_50",
-    "rsi_14",
-    "adx_14",
-    "sma_20_delta",
-    "ema_50_delta",
-    "rsi_14_delta",
-    "adx_14_delta",
-    "eps_surprise",
-]
-
-ENGINEERED_COLS = [
-    "price_sma20_ratio",
-    "ema50_sma20_ratio",
-    "rsi_centered",
-    "adx_log1p",
-    "sent_rsi",
-    "eps_surprise_isnull",
-]
-
-for _c in EMB_COLS:
-    _b = _c.replace("_embedding", "")
-    ENGINEERED_COLS.extend([f"{_b}_norm", f"{_b}_mean", f"{_b}_std"])
-
-LDA_COLS = [f"lda_topic_{i}" for i in range(10)]
-
-FINBERT_COLS = [
-    "pos_prob",
-    "neg_prob",
-    "neu_prob",
-]
-
-# ─────────────────────────── Helpers ────────────────────────────
-
-
-def load_data(project_id: str, source_table: str, breakout_threshold: float) -> pd.DataFrame:
-    """Load & basic‑clean BigQuery training data."""
-    logging.info("Loading data from %s.%s", project_id, source_table)
+def load_raw_price_data(project_id: str, source_table: str) -> pd.DataFrame:
+    """Loads raw OHLCV data from BigQuery."""
+    logging.info("Loading raw price data from %s.%s", project_id, source_table)
     bq = bigquery.Client(project=project_id)
-    df = bq.query(
-        f"""
-        SELECT *
-        FROM {project_id}.{source_table}
-        WHERE adj_close_on_call_date IS NOT NULL
-        AND max_close_30d IS NOT NULL
-        AND earnings_call_date IS NOT NULL
-        """
-    ).to_dataframe()
+    
+    query = f"""
+        SELECT ticker, date, open, high, low, adj_close as close, volume
+        FROM `{project_id}.{source_table}`
+        WHERE adj_close IS NOT NULL
+        ORDER BY ticker, date
+    """
+    df = bq.query(query).to_dataframe()
+    
+    df.rename(columns={
+        "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"
+    }, inplace=True)
+    
+    df["date"] = pd.to_datetime(df["date"])
     logging.info("Loaded %d rows", len(df))
-
-    # ---------------- Parse embedding columns ----------------
-    bad = {col: 0 for col in EMB_COLS}
-    for col in EMB_COLS:
-        if col not in df.columns:
-            continue
-
-        def _parse(v):
-            try:
-                if isinstance(v, str) and v.startswith("["):
-                    arr = np.asarray(json.loads(v), dtype=np.float32)
-                elif isinstance(v, (list, np.ndarray)):
-                    arr = np.asarray(v, dtype=np.float32)
-                else:
-                    return np.nan
-                if arr.ndim != 1 or arr.size == 0:
-                    bad[col] += 1
-                    return np.nan
-                return arr
-            except Exception:
-                bad[col] += 1
-                return np.nan
-
-        df[col] = df[col].apply(_parse)
-
-    for col, n_bad in bad.items():
-        if n_bad:
-            logging.warning("Invalid embeddings for %s: %d rows", col, n_bad)
-
-    df["earnings_call_date"] = pd.to_datetime(df["earnings_call_date"])
-    df.sort_values("earnings_call_date", inplace=True)
-    df["breakout"] = (
-        (df["max_close_30d"] / df["adj_close_on_call_date"] - 1) >= breakout_threshold
-    ).astype(int)
-    logging.info("Breakout rate: %.2f%%", 100 * df["breakout"].mean())
     return df
 
-
-def preprocess_data(df: pd.DataFrame, params: dict):
-    """ Winsorise, impute, PCA-reduce embeddings, and assemble the feature matrix.
-
-    Returns
-    -------
-    X_all : np.ndarray  # final feature matrix
-    y_all : np.ndarray  # target vector
-    train_idx : pd.Index  # indices for training rows
-    holdout_idx : pd.Index  # indices for hold-out rows
-    feature_names : list[str]  # ordered names of all features in X_all
-    pca_map : dict[str, PCA]  # fitted PCA objects keyed by embedding column
-    imputer : SimpleImputer  # fitted imputer
-    winsor_map : dict[str, tuple[float, float]] Lower / upper clip bounds for each winsorised column.
-    sector_mean_map : dict[str, float] Sector-level fallback means used to fill EPS surprise.
-    """
-    split_date = df["earnings_call_date"].quantile(0.8, interpolation="nearest")
-    train_idx = df[df["earnings_call_date"] < split_date].index
-    holdout_idx = df[df["earnings_call_date"] >= split_date].index
-
-    # ---------- winsorise ----------
-    winsor_cols = STATIC_NUM_COLS + ENGINEERED_COLS + LDA_COLS + FINBERT_COLS
-    winsor_map: dict[str, tuple[float, float]] = {}
-    for col in winsor_cols:
-        if col in df.columns:
-            lo, hi = df.loc[train_idx, col].quantile(params["winsor_quantiles"])
-            df[col] = df[col].clip(lo, hi)
-            winsor_map[col] = (lo, hi)
-
-    # ---------- EPS surprise sector mean fill ----------
-    sector_mean_map = (
-        df.loc[train_idx]
-        .groupby("industry_sector")["eps_surprise"]
-        .mean()
-        .to_dict()
-    )
-    df["eps_surprise"] = (
-        df["eps_surprise"]
-        .fillna(df["industry_sector"].map(sector_mean_map))
-        .fillna(0.0)
-    )
-
-    # ---------- PCA on embeddings ----------
-    pca_cols, X_pca_list, pca_map = [], [], {}
-    for col in EMB_COLS:
-        if col not in df.columns:
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Generates technical indicators using pandas_ta."""
+    logging.info("Engineering features...")
+    sys.stdout.flush()
+    
+    results = []
+    grouped = df.groupby("ticker")
+    processed_count = 0
+    total_tickers = len(grouped)
+    
+    for ticker, group in grouped:
+        if len(group) < 200:
             continue
-        valid = df[col].dropna()
-        if valid.empty:
-            continue
-        # Ensure consistent dimension
-        emb_lens = valid.apply(lambda x: x.shape[0])
-        if emb_lens.nunique() > 1:
-            common = emb_lens.mode()[0]
-            valid = valid[emb_lens == common]
-        if valid.empty:
-            continue
-        train_valid = train_idx.intersection(valid.index)
-        if train_valid.empty:
-            continue
-        stacked = np.vstack(df.loc[train_valid, col].values)
-        emb_dim = stacked.shape[1]
-        n_comp = min(params["pca_n"], stacked.shape[0], emb_dim)
-        if n_comp == 0:
-            continue
-        pca = PCA(n_components=n_comp, random_state=params["random_state"]).fit(stacked)
-        evr = pca.explained_variance_ratio_.sum()
-        logging.info("PCA %s → %d comps (EVR %.2f)", col, n_comp, evr)
-        logging.info("Explained variance ratios: %s", list(pca.explained_variance_ratio_))
-        logging.info("Explained variances: %s", list(pca.explained_variance_))
-        # transform all rows (missing rows stay NaN)
-        full_trans = np.full((len(df), n_comp), np.nan, dtype=np.float32)
-        idx_pos = df.index.get_indexer(valid.index)
-        full_trans[idx_pos] = pca.transform(np.vstack(valid.values))
-        X_pca_list.append(full_trans)
-        pca_map[col] = pca
-        pca_cols.extend(f"{col}_pc{i}" for i in range(n_comp))
+            
+        g = group.copy().set_index("date").sort_index()
+        
+        # --- Trend ---
+        g.ta.sma(length=10, append=True)
+        g.ta.sma(length=20, append=True)
+        g.ta.sma(length=50, append=True)
+        g.ta.sma(length=200, append=True)
+        g.ta.ema(length=10, append=True)
+        g.ta.ema(length=50, append=True)
+        g.ta.adx(length=14, append=True)
+        g.ta.macd(fast=12, slow=26, signal=9, append=True)
+
+        # --- Momentum ---
+        g.ta.rsi(length=14, append=True)
+        g.ta.rsi(length=5, append=True) # Fast RSI
+        g.ta.stoch(k=14, d=3, smooth_k=3, append=True)
+        g.ta.roc(length=1, append=True) # 1-day change
+        g.ta.roc(length=3, append=True) # 3-day change
+        g.ta.roc(length=5, append=True) # 5-day change
+
+        # --- Volatility ---
+        g.ta.atr(length=14, append=True)
+        g.ta.atr(length=3, append=True) # Fast ATR
+        # ATR Ratio: Fast / Slow (Rising volatility check)
+        # pandas_ta names them ATRr_14 and ATRr_3 usually
+        if "ATRr_3" in g.columns and "ATRr_14" in g.columns:
+             g["atr_ratio"] = g["ATRr_3"] / g["ATRr_14"]
+        else:
+             g["atr_ratio"] = 1.0
+
+        g.ta.bbands(length=20, std=2, append=True)
+
+        # --- Volume ---
+        g.ta.obv(append=True)
+        # RVOL
+        vol_sma = g["Volume"].rolling(window=20).mean()
+        g["RVOL_20"] = g["Volume"] / vol_sma
+        # Volume Delta
+        g["volume_delta"] = g["Volume"].pct_change()
+
+        # --- Ratios & Structure ---
+        if "SMA_20" in g.columns:
+            g["price_vs_sma20"] = g["Close"] / g["SMA_20"]
+        if "SMA_50" in g.columns:
+            g["price_vs_sma50"] = g["Close"] / g["SMA_50"]
+        if "SMA_200" in g.columns:
+            g["price_vs_sma200"] = g["Close"] / g["SMA_200"]
+        
+        g["dist_from_high"] = (g["High"] - g["Close"]) / g["Close"]
+        g["dist_from_low"]  = (g["Close"] - g["Low"]) / g["Close"]
+        
+        # Close Location Value (CLV) - Where in the High-Low range did we close?
+        # ((C - L) - (H - C)) / (H - L) -> Ranges from -1 (Low) to 1 (High)
+        # Or simpler: (C - L) / (H - L) -> 0 to 1
+        denom = (g["High"] - g["Low"])
+        g["close_loc"] = (g["Close"] - g["Low"]) / denom
+        g.loc[denom == 0, "close_loc"] = 0.5 # Handle flat days
+
+        # --- Target Generation: High Gamma ---
+        g["next_close"] = g["Close"].shift(-1)
+        atr_col = "ATRr_14" if "ATRr_14" in g.columns else "ATR_14"
+        
+        if atr_col in g.columns:
+            threshold = 0.5 * g[atr_col]
+            g["target"] = ((g["next_close"] - g["Close"]) > threshold).astype(int)
+        else:
+            g["target"] = 0
+            
+        g["ticker"] = ticker
+        results.append(g)
+        
+        processed_count += 1
+        if processed_count % 100 == 0:
+            logging.info("Processed %d/%d tickers", processed_count, total_tickers)
+            sys.stdout.flush()
+
+    if not results:
+        return pd.DataFrame()
+        
+    full_df = pd.concat(results).reset_index()
+    del results
     gc.collect()
-    X_pca = np.hstack(X_pca_list) if X_pca_list else np.empty((len(df), 0), np.float32)
+    
+    # Clean up column names to lowercase match
+    full_df.columns = [c.lower() for c in full_df.columns]
+    
+    # Explicitly cast features to float32 FIRST
+    # This ensures any overflows (float64 -> float32 -> inf) are caught in the subsequent clean
+    for col in FEATURE_NAMES:
+        # errors='coerce' turns non-numeric junk into NaNs
+        full_df[col] = pd.to_numeric(full_df[col], errors='coerce').astype('float32')
 
-    # ---------- numeric ----------
-    num_final = [c for c in winsor_cols if c in df.columns]
+    # Handle Infinite values (e.g. from volume delta 0 division or float32 overflow)
+    import numpy as np
+    full_df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    X_num = df[num_final].to_numpy(dtype=np.float32)
+    # Ensure all required features exist (fill NaNs for very start of history if needed, or drop)
+    # We drop because indicators need warmup
+    full_df.dropna(subset=FEATURE_NAMES + ["target"], inplace=True)
+    
+    return full_df
 
-    # ---------- assemble ----------
-    X_all = np.hstack([X_pca, X_num]).astype(np.float32)
-    y_all = df["breakout"].values
-    feature_names = pca_cols + num_final
-    logging.info(
-        "Feature matrix: %s, Train/Holdout: %d/%d",
-        X_all.shape,
-        len(train_idx),
-        len(holdout_idx),
-    )
-    imputer = SimpleImputer(strategy="constant", fill_value=0).fit(X_all[train_idx])
-    X_all = imputer.transform(X_all)
-    return (
-        X_all,
-        y_all,
-        train_idx,
-        holdout_idx,
-        feature_names,
-        pca_map,
-        imputer,
-        winsor_map,
-        sector_mean_map,
-    )
+def validate_data(X, y, name="dataset"):
+    """Checks for NaNs, Infs, or object types."""
+    import numpy as np
+    logging.info("Validating %s...", name)
+    
+    # Check X for NaNs
+    if X.isnull().values.any():
+        null_cols = X.columns[X.isnull().any()].tolist()
+        logging.error("%s contains NaNs in columns: %s", name, null_cols)
+        raise ValueError(f"{name} contains NaNs!")
+        
+    # Check X for Infs
+    if np.isinf(X.values).any():
+        inf_cols = X.columns[np.isinf(X.values).any(axis=0)].tolist()
+        logging.error("%s contains Infs in columns: %s", name, inf_cols)
+        raise ValueError(f"{name} contains Infs!")
+    
+    # Check types
+    non_numeric = X.select_dtypes(exclude=[np.number]).columns
+    if len(non_numeric) > 0:
+        raise ValueError(f"{name} contains non-numeric columns: {non_numeric}")
 
+    # Check y
+    if y.isnull().values.any():
+        raise ValueError(f"{name} target contains NaNs!")
+    if np.isinf(y.values).any():
+        raise ValueError(f"{name} target contains Infs!")
+        
+    logging.info("%s validation passed. Shape: %s", name, X.shape)
 
 def train_and_evaluate(
-    X_all: np.ndarray,
-    y_all: np.ndarray,
-    train_idx: pd.Index,
-    holdout_idx: pd.Index,
-    feature_names: list[str],
-    params: dict,
-    imputer: SimpleImputer,
-    winsor_map: dict[str, tuple[float, float]],
-    sector_mean_map: dict[str, float],
+    X_train, y_train, X_val, y_val, params
 ):
-    """ Train XGBoost, calibrate with isotonic regression, and return Booster, metric dict, and artefact bundle. """
+    """Trains XGBoost and evaluates."""
+    
+    pos_frac = y_train.mean()
+    suggested_scale = (1 - pos_frac) / pos_frac
+    logging.info("Training set positive fraction: %.4f (Suggested scale_pos_weight: %.2f)", pos_frac, suggested_scale)
+    
+    scale = params["scale_pos_weight"]
+    if scale == 0.0: 
+        scale = suggested_scale
 
-    # ---------- focal-loss objective ----------
-    def focal_binary_obj(preds, dtrain):
-        labels = dtrain.get_label()
-        gamma = params["focal_gamma"]
-        p = 1.0 / (1.0 + np.exp(-preds))
-        minus = np.where(labels == 1.0, -1.0, 1.0)
-        eta1 = p * (1.0 - p)
-        eta2 = labels + minus * p
-        eta3 = p + labels - 1.0
-        eta4 = np.clip(1.0 - labels - minus * p, 1e-10, 1.0 - 1e-10)
-        grad = gamma * eta3 * (eta2**gamma) * np.log(eta4) + minus * (eta2 ** (gamma + 1.0))
-        hess = eta1 * (
-            gamma
-            * (
-                eta2**gamma
-                + gamma * minus * eta3 * (eta2 ** (gamma - 1.0)) * np.log(eta4)
-                - minus * eta3 * (eta2**gamma) / eta4
-            )
-            + (gamma + 1.0) * (eta2**gamma)
-        )
-        return grad, hess + 1e-16
+    validate_data(X_train, y_train, "Train Set")
+    validate_data(X_val, y_val, "Validation Set")
 
-    # ---------- split for early stopping ----------
-    split = int(len(train_idx) * 0.8)
-    sub_idx = train_idx[:split]
-    val_idx = train_idx[split:]
-    X_sub, y_sub = X_all[sub_idx], y_all[sub_idx]
-    X_val, y_val = X_all[val_idx], y_all[val_idx]
-    X_tr, y_tr = X_all[train_idx], y_all[train_idx]
-    X_hd, y_hd = X_all[holdout_idx], y_all[holdout_idx]
-
-    # ---------- XGBoost baseline for feature selection (if enabled) ----------
-    selected_features = feature_names[:]  # Start with all
-    if params["top_k_features"] > 0 or params["auto_prune"]:
-        # Train baseline model for importances
-        dsub_base = xgb.DMatrix(X_sub, y_sub, feature_names=feature_names)
-        dval_base = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
-        bst_base = xgb.train(
-            {
-                "eval_metric": "aucpr",
-                "learning_rate": params["learning_rate"],
-                "max_depth": params["xgb_max_depth"],
-                "min_child_weight": params["xgb_min_child_weight"],
-                "subsample": params["xgb_subsample"],
-                "colsample_bytree": params["colsample_bytree"],
-                "gamma": params["gamma"],
-                "alpha": params["alpha"],
-                "lambda": params["reg_lambda"],
-                "scale_pos_weight": params["scale_pos_weight"],
-                "tree_method": "hist",
-                "n_jobs": -1,
-                "random_state": params["random_state"],
-            },
-            dsub_base,
-            num_boost_round=3000,
-            evals=[(dval_base, "val")],
-            early_stopping_rounds=params["early_stopping_rounds"],
-            verbose_eval=False,
-            obj=focal_binary_obj,
-        )
-
-        # Compute and log feature importances ('gain' for informativeness)
-        importances = bst_base.get_score(importance_type='gain')
-        sorted_importances = sorted(importances.items(), key=lambda x: x[1], reverse=True)
-        logging.info("Feature importances (gain): %s", sorted_importances)
-
-        if params["top_k_features"] > 0:
-            # Select top K
-            top_k = min(params["top_k_features"], len(sorted_importances))
-            selected_features = [feat for feat, _ in sorted_importances[:top_k]]
-            logging.info("Selected top %d features: %s", top_k, selected_features)
-
-        if params["auto_prune"]:
-            # Iterative pruning: Remove lowest-importance in steps, retrain, check metric drop
-            baseline_pr_auc = auc(*precision_recall_curve(y_val, bst_base.predict(dval_base))[:2])
-            current_features = sorted_importances.copy()
-            while len(current_features) > params["prune_step"]:
-                # Remove lowest prune_step features
-                current_features = current_features[:-params["prune_step"]]
-                selected_feats = [feat for feat, _ in current_features]
-                feat_indices = [feature_names.index(f) for f in selected_feats]
-
-                # Retrain on subset
-                X_sub_prune = X_sub[:, feat_indices]
-                X_val_prune = X_val[:, feat_indices]
-                dsub_prune = xgb.DMatrix(X_sub_prune, y_sub, feature_names=selected_feats)
-                dval_prune = xgb.DMatrix(X_val_prune, y_val, feature_names=selected_feats)
-                bst_prune = xgb.train(
-                    {**bst_base.params},  # Reuse params
-                    dsub_prune,
-                    num_boost_round=3000,
-                    evals=[(dval_prune, "val")],
-                    early_stopping_rounds=params["early_stopping_rounds"],
-                    verbose_eval=False,
-                    obj=focal_binary_obj,
-                )
-
-                # Check PR-AUC drop
-                prune_pr_auc = auc(*precision_recall_curve(y_val, bst_prune.predict(dval_prune))[:2])
-                if baseline_pr_auc - prune_pr_auc > params["metric_tol"]:
-                    logging.info("Pruning stopped: Metric drop exceeded tol (%.4f)", params["metric_tol"])
-                    break
-                baseline_pr_auc = prune_pr_auc  # Update baseline
-
-            selected_features = [feat for feat, _ in current_features]
-            logging.info("Auto-pruned to %d features: %s", len(selected_features), selected_features)
-
-        # Subset data for final training
-        if len(selected_features) < len(feature_names):
-            feat_indices = [feature_names.index(f) for f in selected_features]
-            X_all = X_all[:, feat_indices]
-            feature_names = selected_features
-            logging.info("Feature matrix after selection: %s", X_all.shape)
-
-    # ---------- Final XGBoost on (possibly selected) features ----------
-    dsub = xgb.DMatrix(X_sub, y_sub, feature_names=feature_names)
-    dval = xgb.DMatrix(X_val, y_val, feature_names=feature_names)
-    bst = xgb.train(
-        {
-            "eval_metric": "aucpr",
-            "learning_rate": params["learning_rate"],
-            "max_depth": params["xgb_max_depth"],
-            "min_child_weight": params["xgb_min_child_weight"],
-            "subsample": params["xgb_subsample"],
-            "colsample_bytree": params["colsample_bytree"],
-            "gamma": params["gamma"],
-            "alpha": params["alpha"],
-            "lambda": params["reg_lambda"],
-            "scale_pos_weight": params["scale_pos_weight"],
-            "tree_method": "hist",
-            "n_jobs": -1,
-            "random_state": params["random_state"],
-        },
-        dsub,
-        num_boost_round=3000,
-        evals=[(dval, "val")],
+    clf = xgb.XGBClassifier(
+        n_estimators=1000,
+        learning_rate=params["learning_rate"],
+        max_depth=params["xgb_max_depth"],
+        min_child_weight=params["xgb_min_child_weight"],
+        subsample=params["xgb_subsample"],
+        colsample_bytree=params["colsample_bytree"],
+        gamma=params["gamma"],
+        reg_alpha=params["alpha"],
+        reg_lambda=params["reg_lambda"],
+        scale_pos_weight=scale,
+        tree_method="hist",
         early_stopping_rounds=params["early_stopping_rounds"],
-        verbose_eval=False,
-        obj=focal_binary_obj,
+        eval_metric="aucpr",
+        random_state=42,
+        n_jobs=2  # Limit cores to prevent potential segfaults/instability
     )
-
-    # Log final importances
-    final_importances = bst.get_score(importance_type='gain')
-    sorted_final = sorted(final_importances.items(), key=lambda x: x[1], reverse=True)
-    logging.info("Final feature importances (gain): %s", sorted_final)
-
-    # ---------- calibrate ----------
-    dtr, dho = xgb.DMatrix(X_tr, feature_names=feature_names), xgb.DMatrix(
-        X_hd, feature_names=feature_names
+    
+    logging.info("Starting XGBoost training...")
+    import sys
+    sys.stdout.flush()
+    
+    clf.fit(
+        X_train, y_train,
+        eval_set=[(X_train, y_train), (X_val, y_val)],
+        verbose=100
     )
-    xgb_tr_raw = bst.predict(dtr, iteration_range=(0, bst.best_iteration + 1))
-    xgb_hd_raw = bst.predict(dho, iteration_range=(0, bst.best_iteration + 1))
-    # Convert XGBoost logits to probabilities
-    xgb_tr_prob = 1 / (1 + np.exp(-xgb_tr_raw))
-    xgb_hd_prob = 1 / (1 + np.exp(-xgb_hd_raw))
-    calibrator = IsotonicRegression(out_of_bounds="clip").fit(xgb_tr_prob, y_tr)
-    prob_hd = calibrator.transform(xgb_hd_prob)
+    
+    logging.info("Training finished.")
+    y_prob = clf.predict_proba(X_val)[:, 1]
+    
+    pr_auc = average_precision_score(y_val, y_prob)
+    brier = brier_score_loss(y_val, y_prob)
+    
+    results = pd.DataFrame({"prob": y_prob, "true": y_val})
+    results.sort_values("prob", ascending=False, inplace=True)
+    top_100 = results.head(100)
+    prec_at_100 = top_100["true"].mean()
+    threshold_at_100 = float(top_100["prob"].min())
+    
+    metrics = {
+        "pr_auc": float(pr_auc),
+        "brier": float(brier),
+        "prec_at_100": float(prec_at_100),
+        "threshold_at_100": threshold_at_100,
+        "best_iteration": int(clf.best_iteration)
+    }
+    
+    return clf, metrics
 
-    # ---------- metrics ----------
-    prec, rec, _ = precision_recall_curve(y_hd, prob_hd)
-    pr_auc = auc(rec, prec)
-    f1 = f1_score(y_hd, (prob_hd >= 0.5).astype(int))
-    recall_at_prec05 = rec[prec >= 0.50].max() if (prec >= 0.50).any() else 0.0
-    brier = brier_score_loss(y_hd, prob_hd)
-    metrics = dict(
-        pr_auc=float(pr_auc),
-        f1=float(f1),
-        recall_at_prec05=float(recall_at_prec05),
-        brier=float(brier),
-    )
-    artifacts = dict(
-        imputer=imputer,
-        calibrator=calibrator,
-        threshold=params["thresh_req_recall"],
-        winsor_map=winsor_map,
-        sector_mean_map=sector_mean_map,
-    )
-    return bst, metrics, artifacts
-
-
-def save_artifacts(bst, artifacts, pca_map, model_dir: str):
-    """ Persist model + preprocessing artefacts to GCS.
-    * Saves the Booster in **text JSON** (guaranteed UTF-8) even on XGBoost ≥ 2.1 by passing format="json".
-    * File is now clearly named xgb_model.json.
-    """
+def save_feature_importance(model, feature_names, model_dir: str):
+    """Saves feature importance to GCS."""
     if not model_dir.startswith("gs://"):
-        logging.error("AIP_MODEL_DIR must be on GCS (got %s)", model_dir)
+        logging.warning("AIP_MODEL_DIR not GCS, skipping feature importance upload.")
         return
-    bucket_name, prefix = urllib.parse.urlparse(model_dir).netloc, urllib.parse.urlparse(
-        model_dir
-    ).path.lstrip("/")
+
+    bucket_name = urllib.parse.urlparse(model_dir).netloc
+    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+    
+    # Get importance
+    importance = model.feature_importances_
+    fi_df = pd.DataFrame({
+        "feature": feature_names,
+        "importance": importance
+    }).sort_values("importance", ascending=False)
+    
     with tempfile.TemporaryDirectory() as tmp:
-        # 1️⃣ Booster – force JSON *text* format
-        bst.save_model(os.path.join(tmp, "xgb_model.json"))
-        # 2️⃣ Pre-processing artefacts
-        joblib.dump(artifacts, os.path.join(tmp, "training_artifacts.joblib"))
-        joblib.dump(pca_map, os.path.join(tmp, "pca_map.joblib"))
+        local_path = os.path.join(tmp, "feature_importance.csv")
+        fi_df.to_csv(local_path, index=False)
+        
         client = storage.Client()
         bucket = client.bucket(bucket_name)
-        for fname in os.listdir(tmp):
-            blob = bucket.blob(os.path.join(prefix, fname))
-            blob.upload_from_filename(os.path.join(tmp, fname))
-            logging.info("Uploaded %s to gs://%s/%s", fname, bucket_name, blob.name)
+        blob = bucket.blob(os.path.join(prefix, "feature_importance.csv"))
+        blob.upload_from_filename(local_path)
+        logging.info("Feature importance saved to %s", blob.public_url)
+        
+        # Also log top 20 to console
+        logging.info("Top 20 Features:\n%s", fi_df.head(20).to_string())
+
+def save_artifacts(model, model_dir: str):
+    """Saves model to GCS."""
+    if not model_dir.startswith("gs://"):
+        logging.error("AIP_MODEL_DIR must be GCS.")
+        return
+        
+    bucket_name = urllib.parse.urlparse(model_dir).netloc
+    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+    
+    with tempfile.TemporaryDirectory() as tmp:
+        local_path = os.path.join(tmp, "model.json")
+        model.save_model(local_path)
+        
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(os.path.join(prefix, "model.json"))
+        blob.upload_from_filename(local_path)
+        logging.info("Model saved to %s", blob.public_url)
+
+def save_threshold(threshold: float, model_dir: str):
+
+    """Saves threshold to GCS."""
+
+    if not model_dir.startswith("gs://"):
+
+        return
 
 
-def main() -> None:
+
+    bucket_name = urllib.parse.urlparse(model_dir).netloc
+
+    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+
+    
+
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+
+        local_path = os.path.join(tmp, "threshold.json")
+
+        with open(local_path, "w") as f:
+
+            json.dump({"threshold": threshold}, f)
+
+        
+
+        client = storage.Client()
+
+        bucket = client.bucket(bucket_name)
+
+        blob = bucket.blob(os.path.join(prefix, "threshold.json"))
+
+        blob.upload_from_filename(local_path)
+
+        logging.info("Threshold saved to %s", blob.public_url)
+
+
+
+def promote_model(model_dir: str, prod_dir: str = "gs://profitscout-lx6bb-pipeline-artifacts/production/model"):
+
+    """Copies artifacts to a stable production location."""
+
+    if not model_dir.startswith("gs://"):
+
+        return
+
+        
+
+    logging.info("Promoting model to %s...", prod_dir)
+
+    client = storage.Client()
+
+    
+
+    # Parse source
+
+    src_bucket_name = urllib.parse.urlparse(model_dir).netloc
+
+    src_prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+
+    src_bucket = client.bucket(src_bucket_name)
+
+    
+
+    # Parse dest
+
+    dst_bucket_name = urllib.parse.urlparse(prod_dir).netloc
+
+    dst_prefix = urllib.parse.urlparse(prod_dir).path.lstrip("/")
+
+    dst_bucket = client.bucket(dst_bucket_name)
+
+    
+
+    # Copy files
+
+    for filename in ["model.json", "threshold.json", "feature_importance.csv"]:
+
+        src_blob = src_bucket.blob(os.path.join(src_prefix, filename))
+
+        if src_blob.exists():
+
+            dst_blob = dst_bucket.blob(os.path.join(dst_prefix, filename))
+
+            src_bucket.copy_blob(src_blob, dst_bucket, dst_blob.name)
+
+            logging.info("Promoted %s", filename)
+
+
+
+def main():
+
     parser = argparse.ArgumentParser()
+
+
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--source-table", required=True)
-    parser.add_argument("--experiment-name", default="profitscout-training")
-    parser.add_argument(
-        "--run-name", default=f"run-{pd.Timestamp.now():%Y%m%d-%H%M%S}"
-    )
-
-    # ───────── Hyper‑parameters ─────────
+    parser.add_argument("--experiment-name", default="profitscout-high-gamma")
+    parser.add_argument("--run-name", default=f"run-{pd.Timestamp.now():%Y%m%d-%H%M%S}")
+    
     hp = parser.add_argument
-    hp("--pca-n", "--pca_n", dest="pca_n", type=int, default=512)
-    hp("--xgb-max-depth", "--xgb_max_depth", dest="xgb_max_depth", type=int, default=8)
-    hp(
-        "--xgb-min-child-weight",
-        "--xgb_min_child_weight",
-        dest="xgb_min_child_weight",
-        type=int,
-        default=10,
-    )
-    hp(
-        "--xgb-subsample", "--xgb_subsample", dest="xgb_subsample", type=float, default=1.0
-    )
-    hp(
-        "--learning-rate", "--learning_rate", dest="learning_rate", type=float, default=0.02
-    )
-    hp("--gamma", type=float, default=0.3)
-    hp(
-        "--colsample-bytree",
-        "--colsample_bytree",
-        dest="colsample_bytree",
-        type=float,
-        default=0.7,
-    )
-    hp("--alpha", type=float, default=0.0002)
-    hp("--reg-lambda", "--reg_lambda", dest="reg_lambda", type=float, default=0.0001)
-    hp(
-        "--focal-gamma", "--focal_gamma", dest="focal_gamma", type=float, default=1.0
-    )
-    hp("--scale-pos-weight", "--scale_pos_weight", dest="scale_pos_weight", type=float, default=5.0)
-
-    # ───────── Feature‑selection flags ─────────
-    hp(
-        "--top-k-features",
-        "--top_k_features",
-        dest="top_k_features",
-        type=int,
-        default=0,
-    )
-    hp(
-        "--auto-prune",
-        dest="auto_prune",
-        type=str,
-        choices=["true", "false"],
-        default="false",
-    )
-    hp("--metric-tol", dest="metric_tol", type=float, default=0.002)
-    hp("--prune-step", dest="prune_step", type=int, default=25)
-    hp(
-        "--use-full-data",
-        "--use_full_data",
-        dest="use_full_data",
-        type=str,
-        choices=["true", "false"],
-        default="false",
-    )
+    hp("--xgb-max-depth", dest="xgb_max_depth", type=int, default=6)
+    hp("--learning-rate", dest="learning_rate", type=float, default=0.03)
+    hp("--xgb-min-child-weight", dest="xgb_min_child_weight", type=int, default=10)
+    hp("--xgb-subsample", dest="xgb_subsample", type=float, default=0.8)
+    hp("--colsample-bytree", dest="colsample_bytree", type=float, default=0.8)
+    hp("--gamma", type=float, default=0.1)
+    hp("--alpha", type=float, default=0.001)
+    hp("--reg-lambda", dest="reg_lambda", type=float, default=1.0)
+    hp("--scale-pos-weight", dest="scale_pos_weight", type=float, default=0.0) 
 
     args = parser.parse_args()
-    auto_prune_flag = args.auto_prune.lower() == "true"
-    use_full_flag = args.use_full_data.lower() == "true"
+    
+    params = vars(args)
+    params["early_stopping_rounds"] = 50
 
-    params = dict(
-        pca_n=args.pca_n,
-        random_state=42,
-        early_stopping_rounds=150,
-        thresh_req_recall=0.5,
-        winsor_quantiles=(0.01, 0.99),
-        breakout_threshold=0.12,
-        xgb_max_depth=args.xgb_max_depth,
-        xgb_min_child_weight=args.xgb_min_child_weight,
-        xgb_subsample=args.xgb_subsample,
-        learning_rate=args.learning_rate,
-        gamma=args.gamma,
-        colsample_bytree=args.colsample_bytree,
-        alpha=args.alpha,
-        reg_lambda=args.reg_lambda,
-        focal_gamma=args.focal_gamma,
-        scale_pos_weight=args.scale_pos_weight,
-        top_k_features=args.top_k_features,
-        auto_prune=auto_prune_flag,
-        use_full_data=use_full_flag,
-        metric_tol=args.metric_tol,
-        prune_step=args.prune_step,
-    )
-
-    # ───────── Vertex AI experiment tracking ─────────
-    exp_tracking = False
     try:
-        aiplatform.init(
-            project=args.project_id, location="us-central1", experiment=args.experiment_name
-        )
+        aiplatform.init(project=args.project_id, experiment=args.experiment_name)
         aiplatform.start_run(run=args.run_name)
         aiplatform.log_params(params)
-        exp_tracking = True
-    except Exception as err:
-        logging.warning("Skipping Vertex AI experiment tracking: %s", err)
+    except Exception as e:
+        logging.warning("Vertex AI init failed: %s", e)
+
+    raw_df = load_raw_price_data(args.project_id, args.source_table)
+    
+    df = engineer_features(raw_df)
+    logging.info("Feature Matrix shape: %s", df.shape)
+    logging.info("Target distribution:\n%s", df["target"].value_counts(normalize=True))
+    sys.stdout.flush()
+
+    del raw_df
+    gc.collect()
+
+    df.sort_values("date", inplace=True)
+    
+    split_idx = int(len(df) * 0.8)
+    train_df = df.iloc[:split_idx]
+    val_df = df.iloc[split_idx:]
+    
+    X_train = train_df[FEATURE_NAMES]
+    y_train = train_df["target"]
+    X_val = val_df[FEATURE_NAMES]
+    y_val = val_df["target"]
+    
+    logging.info("Train shape: %s, Val shape: %s", X_train.shape, X_val.shape)
+
+    model, metrics = train_and_evaluate(X_train, y_train, X_val, y_val, params)
+    
+    for k, v in metrics.items():
+        logging.info("%s: %f", k, v)
+        try:
+             aiplatform.log_metrics({k: v})
+        except Exception:
+             # Ignore if no active run or other logging error
+             pass
 
     try:
-        df = load_data(args.project_id, args.source_table, params["breakout_threshold"])
-        (
-            X_all,
-            y_all,
-            train_idx,
-            holdout_idx,
-            feat_names,
-            pca_map,
-            imputer,
-            winsor_map,
-            sector_mean_map,
-        ) = preprocess_data(df, params)
-
-        # ---------- full‑data override ----------
-        if params["use_full_data"]:
-            train_idx = holdout_idx = np.arange(len(df))
-            logging.info(
-                "Using 100%% of rows for training; hold‑out metrics will be skipped."
-            )
-
-        # ---------- Train ----------
-        bst, metrics, artifacts = train_and_evaluate(
-            X_all,
-            y_all,
-            train_idx,
-            holdout_idx,
-            feat_names,
-            params,
-            imputer,
-            winsor_map,
-            sector_mean_map,
+        ht = hypertune.HyperTune()
+        ht.report_hyperparameter_tuning_metric(
+            hyperparameter_metric_tag="pr_auc",
+            metric_value=metrics["pr_auc"],
+            global_step=1
         )
+    except:
+        pass
 
-        # If we trained on full data, blank out misleading metrics
-        if params["use_full_data"]:
-            metrics = {k: "n/a (full‑data fit)" for k in metrics}
-
-        for k, v in metrics.items():
-            logging.info("Metric %s: %s", k, v)
-        if exp_tracking:
-            aiplatform.log_metrics(metrics)
-
-        # no hypertune reporting when metrics are n/a
-        if not params["use_full_data"]:
-            try:
-                ht = hypertune.HyperTune()
-                for tag, val in metrics.items():
-                    ht.report_hyperparameter_tuning_metric(
-                        hyperparameter_metric_tag=tag,
-                        metric_value=val,
-                        global_step=1,
-                    )
-            except Exception:
-                pass
-
-        model_dir = os.getenv("AIP_MODEL_DIR")
-        if model_dir:
-            save_artifacts(bst, artifacts, pca_map, model_dir)
-            if exp_tracking:
-                aiplatform.log_params({"model_dir": model_dir})
-
-        logging.info("Training run complete.")
-    except Exception as e:
-        logging.exception("Training failed: %s", e)
-        raise
+    model_dir = os.getenv("AIP_MODEL_DIR")
+    if model_dir:
+        save_artifacts(model, model_dir)
+        save_feature_importance(model, FEATURE_NAMES, model_dir)
+        if "threshold_at_100" in metrics:
+            save_threshold(metrics["threshold_at_100"], model_dir)
+            
+        # Promote to stable production path
+        promote_model(model_dir)
 
 
 if __name__ == "__main__":
-    main()
+    import traceback
+    import sys
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.exit(1)
