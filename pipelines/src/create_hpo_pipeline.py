@@ -4,6 +4,7 @@
 Creates a Vertex AI Hyperparameter Tuning Job for the High Gamma Model.
 """
 
+import argparse
 from google.cloud import aiplatform
 from google.cloud.aiplatform import hyperparameter_tuning as hpt
 
@@ -11,10 +12,10 @@ PROJECT_ID = "profitscout-lx6bb"
 REGION = "us-central1"
 STAGING_BUCKET = f"gs://{PROJECT_ID}-pipeline-artifacts"
 TRAINER_IMAGE_URI = (
-    f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/trainer:latest"
+    f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/profitscout-trainer:latest"
 )
 
-def create_hpo_job():
+def create_hpo_job(direction: str = "LONG"):
     aiplatform.init(project=PROJECT_ID, location=REGION, staging_bucket=STAGING_BUCKET)
 
     # Define the custom job spec (what runs in each trial)
@@ -29,6 +30,7 @@ def create_hpo_job():
                 "args": [
                     "--project-id", PROJECT_ID,
                     "--source-table", "profit_scout.price_data",
+                    "--direction", direction,
                     # HPO service will append the tuning args automatically
                 ],
             },
@@ -57,7 +59,7 @@ def create_hpo_job():
 
     # Create the Tuning Job
     hpo_job = aiplatform.HyperparameterTuningJob(
-        display_name="profitscout-high-gamma-hpo",
+        display_name=f"profitscout-high-gamma-hpo-{direction.lower()}",
         custom_job=custom_job,
         metric_spec={"pr_auc": "maximize"},
         parameter_spec=parameter_spec,
@@ -65,10 +67,13 @@ def create_hpo_job():
         parallel_trial_count=4,
     )
 
-    print("Submitting HPO Job...")
+    print(f"Submitting HPO Job for direction: {direction}...")
     hpo_job.run(sync=False) # Submit and return (don't block CLI)
     print(f"HPO Job submitted. Resource name: {hpo_job.resource_name}")
     print(f"View in Console: https://console.cloud.google.com/vertex-ai/training/hyperparameter-tuning-jobs?project={PROJECT_ID}")
 
 if __name__ == "__main__":
-    create_hpo_job()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--direction", default="LONG", choices=["LONG", "SHORT"])
+    args = parser.parse_args()
+    create_hpo_job(direction=args.direction)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ProfitScout Batch Prediction Script
-Loads model from GCS, generates technical features from raw price data, and predicts High Gamma opportunities.
+Loads LONG and SHORT models from GCS, generates technical features, and predicts High Gamma opportunities.
+Outputs Top 50 CALLs and Top 50 PUTs.
 """
 import argparse
 import logging
@@ -11,6 +12,8 @@ import urllib.parse
 import pandas as pd
 import pandas_ta_classic as ta
 import xgboost as xgb
+import numpy as np
+import json
 from google.cloud import bigquery, storage
 
 logging.basicConfig(level=logging.INFO)
@@ -35,22 +38,20 @@ FEATURE_NAMES = [
     "dist_from_high", "dist_from_low", "close_loc"
 ]
 
-import json
-
-def load_threshold(model_dir: str) -> float:
-    """Download and load threshold from GCS."""
-    if not model_dir.startswith("gs://"):
+def load_threshold(model_path: str) -> float:
+    """Download and load threshold from GCS path."""
+    if not model_path.startswith("gs://"):
         return 0.5
         
-    bucket_name = urllib.parse.urlparse(model_dir).netloc
-    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+    bucket_name = urllib.parse.urlparse(model_path).netloc
+    prefix = urllib.parse.urlparse(model_path).path.lstrip("/")
     
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(os.path.join(prefix, "threshold.json"))
     
     if not blob.exists():
-        logging.warning("threshold.json not found, defaulting to 0.5")
+        logging.warning("threshold.json not found at %s, defaulting to 0.5", model_path)
         return 0.5
     
     with tempfile.TemporaryDirectory() as tmp:
@@ -61,17 +62,20 @@ def load_threshold(model_dir: str) -> float:
             data = json.load(f)
             return float(data.get("threshold", 0.5))
 
-def load_model(model_dir: str):
-    """Download and load XGBoost model from GCS."""
-    if not model_dir.startswith("gs://"):
-        raise ValueError("model-dir must start with gs://")
+def load_model(model_path: str):
+    """Download and load XGBoost model from GCS path."""
+    if not model_path.startswith("gs://"):
+        raise ValueError(f"model-path must start with gs://, got {model_path}")
         
-    bucket_name = urllib.parse.urlparse(model_dir).netloc
-    prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
+    bucket_name = urllib.parse.urlparse(model_path).netloc
+    prefix = urllib.parse.urlparse(model_path).path.lstrip("/")
     
     client = storage.Client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(os.path.join(prefix, "model.json"))
+    
+    if not blob.exists():
+        raise FileNotFoundError(f"model.json not found at {model_path}")
     
     with tempfile.TemporaryDirectory() as tmp:
         local_path = os.path.join(tmp, "model.json")
@@ -171,7 +175,6 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     full_df.columns = [c.lower() for c in full_df.columns]
     
     # Cast features to float32 to ensure DMatrix compatibility
-    import numpy as np
     for col in FEATURE_NAMES:
         full_df[col] = pd.to_numeric(full_df[col], errors='coerce').astype('float32')
         
@@ -187,10 +190,11 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return full_df
 
 def save_predictions(df: pd.DataFrame, project_id: str, destination_table: str):
-    """Saves predictions to BigQuery."""
+    """Saves predictions to BigQuery with contract_type."""
     logging.info("Saving %d predictions to %s", len(df), destination_table)
     
-    out_df = df[["ticker", "date", "close", "prob", "prediction"]].copy()
+    # Output columns
+    out_df = df[["ticker", "date", "close", "prob", "contract_type", "prediction"]].copy()
     
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_TRUNCATE", 
@@ -199,7 +203,8 @@ def save_predictions(df: pd.DataFrame, project_id: str, destination_table: str):
             bigquery.SchemaField("date", "DATE"),
             bigquery.SchemaField("close", "FLOAT64"),
             bigquery.SchemaField("prob", "FLOAT64"),
-            bigquery.SchemaField("prediction", "INTEGER"),
+            bigquery.SchemaField("contract_type", "STRING"),
+            bigquery.SchemaField("prediction", "INTEGER"), # 1 if > threshold, 0 otherwise
         ],
     )
     
@@ -214,7 +219,7 @@ def main():
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--source-table", required=True)
     parser.add_argument("--destination-table", required=True)
-    parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--model-base-dir", required=True, help="Base GCS path for models (e.g. .../production/model)")
     
     # Compat flags
     parser.add_argument("--top-k-features", default="0")
@@ -222,35 +227,62 @@ def main():
     
     args, _ = parser.parse_known_args()
     
-    # 1. Load Data
+    # 1. Load Data & Engineer Features
     raw_df = load_raw_price_data(args.project_id, args.source_table)
-    
-    # 2. Engineer Features
     feat_df = engineer_features(raw_df)
+    
     if feat_df.empty:
         logging.warning("No valid features generated.")
         return
         
-    # 3. Load Model & Threshold
-    bst = load_model(args.model_dir)
-    threshold = load_threshold(args.model_dir)
-    logging.info("Using probability threshold: %f", threshold)
+    all_predictions = []
     
-    # 4. Predict
-    dmatrix = xgb.DMatrix(feat_df[FEATURE_NAMES])
-    probs = bst.predict(dmatrix) 
+    # 2. Iterate Directions
+    for direction, subfolder, contract_type in [
+        ("LONG", "long", "CALL"),
+        ("SHORT", "short", "PUT")
+    ]:
+        model_path = os.path.join(args.model_base_dir, subfolder)
+        logging.info("Processing %s direction from %s...", direction, model_path)
+        
+        try:
+            bst = load_model(model_path)
+            threshold = load_threshold(model_path)
+            logging.info("Loaded %s model. Threshold: %f", direction, threshold)
+            
+            dmatrix = xgb.DMatrix(feat_df[FEATURE_NAMES])
+            probs = bst.predict(dmatrix)
+            
+            # Create a view for this direction
+            dir_df = feat_df.copy()
+            dir_df["prob"] = probs
+            dir_df["contract_type"] = contract_type
+            
+            # Mark strict sniper prediction
+            dir_df["prediction"] = (probs > threshold).astype(int)
+            
+            # Take Top 50 by probability, regardless of threshold
+            # (Users want to see the best available, even if confidence is lower than ideal)
+            top_50_df = dir_df.sort_values("prob", ascending=False).head(50).copy()
+            
+            logging.info("Direction %s: Selected top %d tickers.", direction, len(top_50_df))
+            all_predictions.append(top_50_df)
+            
+        except Exception as e:
+            logging.error("Failed to process %s model: %s", direction, e)
+            continue
+            
+    if not all_predictions:
+        logging.warning("No predictions generated for either direction.")
+        return
+
+    # 3. Consolidate & Save
+    final_df = pd.concat(all_predictions)
     
-    feat_df["prob"] = probs
-    feat_df["prediction"] = (probs >= threshold).astype(int) 
+    # Sort by probability descending to show best setups at top (mixed Calls and Puts)
+    final_df.sort_values("prob", ascending=False, inplace=True)
     
-    # Strategy: "Top Picks"
-    # Instead of filtering purely by threshold (which causes empty days),
-    # we take the Top 50 setups by probability.
-    # The 'prediction' column tells us if it met the "Sniper" standard.
-    top_picks_df = feat_df.sort_values("prob", ascending=False).head(50).copy()
-    
-    # 5. Save
-    save_predictions(top_picks_df, args.project_id, args.destination_table)
+    save_predictions(final_df, args.project_id, args.destination_table)
 
 if __name__ == "__main__":
     main()

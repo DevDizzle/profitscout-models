@@ -20,8 +20,8 @@ aiplatform.PipelineJob(
         "project": "profitscout-lx6bb",
         "source_table": "profit_scout.price_data",
         "destination_table": "profit_scout.daily_predictions",
-        # Update this to point to your actual trained model
-        "model_dir": "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts/model", 
+        # Point to the base directory containing 'long' and 'short' subfolders
+        "model_base_dir": "gs://profitscout-lx6bb-pipeline-artifacts/production/model", 
     },
     enable_caching=False,
 ).run(sync=False)

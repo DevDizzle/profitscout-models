@@ -16,7 +16,7 @@ PROJECT_ID = "profitscout-lx6bb"
 REGION = "us-central1"
 PIPELINE_ROOT = f"gs://{PROJECT_ID}-pipeline-artifacts/inference"
 PREDICTOR_IMAGE_URI = (
-    f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/predictor:latest"
+    f"us-central1-docker.pkg.dev/{PROJECT_ID}/profit-scout-repo/profitscout-predictor:latest"
 )
 # Note: Inference doesn't typically output a model artifact, but CustomJob reqs a base_output_dir
 BASE_OUTPUT_DIR = f"{PIPELINE_ROOT}/job-output"
@@ -27,7 +27,7 @@ def prediction_task(
     project: str,
     source_table: str,
     destination_table: str,
-    model_dir: str,
+    model_base_dir: str,
 ) -> dsl.ContainerSpec:
     return dsl.ContainerSpec(
         image=PREDICTOR_IMAGE_URI,
@@ -36,7 +36,7 @@ def prediction_task(
             "--project-id", project,
             "--source-table", source_table,
             "--destination-table", destination_table,
-            "--model-dir", model_dir,
+            "--model-base-dir", model_base_dir,
         ],
     )
 
@@ -61,13 +61,13 @@ def inference_pipeline(
     project: str = PROJECT_ID,
     source_table: str = "profit_scout.price_data",
     destination_table: str = "profit_scout.daily_predictions",
-    model_dir: str = "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts/latest", # User should update this default
+    model_base_dir: str = "gs://profitscout-lx6bb-pipeline-artifacts/production/model", 
 ):
     prediction_op(
         project=project,
         source_table=source_table,
         destination_table=destination_table,
-        model_dir=model_dir,
+        model_base_dir=model_base_dir,
     )
 
 # ───────────────── Compile and Upload ─────────────────

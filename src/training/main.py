@@ -65,9 +65,9 @@ def load_raw_price_data(project_id: str, source_table: str) -> pd.DataFrame:
     logging.info("Loaded %d rows", len(df))
     return df
 
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+def engineer_features(df: pd.DataFrame, direction: str = "LONG") -> pd.DataFrame:
     """Generates technical indicators using pandas_ta."""
-    logging.info("Engineering features...")
+    logging.info("Engineering features for direction: %s...", direction)
     sys.stdout.flush()
     
     results = []
@@ -143,7 +143,12 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         
         if atr_col in g.columns:
             threshold = 0.5 * g[atr_col]
-            g["target"] = ((g["next_close"] - g["Close"]) > threshold).astype(int)
+            if direction == "SHORT":
+                # Target: Price drops by more than threshold
+                g["target"] = ((g["Close"] - g["next_close"]) > threshold).astype(int)
+            else:
+                # Target: Price rises by more than threshold (LONG)
+                g["target"] = ((g["next_close"] - g["Close"]) > threshold).astype(int)
         else:
             g["target"] = 0
             
@@ -365,54 +370,32 @@ def save_threshold(threshold: float, model_dir: str):
 
 
 
-def promote_model(model_dir: str, prod_dir: str = "gs://profitscout-lx6bb-pipeline-artifacts/production/model"):
-
-    """Copies artifacts to a stable production location."""
-
+def promote_model(model_dir: str, direction: str, prod_base_dir: str = "gs://profitscout-lx6bb-pipeline-artifacts/production/model"):
+    """Copies artifacts to a stable production location with direction subfolder."""
     if not model_dir.startswith("gs://"):
-
         return
-
         
-
+    prod_dir = os.path.join(prod_base_dir, direction.lower())
     logging.info("Promoting model to %s...", prod_dir)
 
     client = storage.Client()
-
     
-
     # Parse source
-
     src_bucket_name = urllib.parse.urlparse(model_dir).netloc
-
     src_prefix = urllib.parse.urlparse(model_dir).path.lstrip("/")
-
     src_bucket = client.bucket(src_bucket_name)
-
     
-
     # Parse dest
-
     dst_bucket_name = urllib.parse.urlparse(prod_dir).netloc
-
     dst_prefix = urllib.parse.urlparse(prod_dir).path.lstrip("/")
-
     dst_bucket = client.bucket(dst_bucket_name)
-
     
-
     # Copy files
-
     for filename in ["model.json", "threshold.json", "feature_importance.csv"]:
-
         src_blob = src_bucket.blob(os.path.join(src_prefix, filename))
-
         if src_blob.exists():
-
             dst_blob = dst_bucket.blob(os.path.join(dst_prefix, filename))
-
             src_bucket.copy_blob(src_blob, dst_bucket, dst_blob.name)
-
             logging.info("Promoted %s", filename)
 
 
@@ -426,6 +409,7 @@ def main():
     parser.add_argument("--source-table", required=True)
     parser.add_argument("--experiment-name", default="profitscout-high-gamma")
     parser.add_argument("--run-name", default=f"run-{pd.Timestamp.now():%Y%m%d-%H%M%S}")
+    parser.add_argument("--direction", default="LONG", choices=["LONG", "SHORT"], help="Training direction: LONG (Call) or SHORT (Put)")
     
     hp = parser.add_argument
     hp("--xgb-max-depth", dest="xgb_max_depth", type=int, default=6)
@@ -452,7 +436,7 @@ def main():
 
     raw_df = load_raw_price_data(args.project_id, args.source_table)
     
-    df = engineer_features(raw_df)
+    df = engineer_features(raw_df, direction=args.direction)
     logging.info("Feature Matrix shape: %s", df.shape)
     logging.info("Target distribution:\n%s", df["target"].value_counts(normalize=True))
     sys.stdout.flush()
@@ -501,7 +485,7 @@ def main():
             save_threshold(metrics["threshold_at_100"], model_dir)
             
         # Promote to stable production path
-        promote_model(model_dir)
+        promote_model(model_dir, direction=args.direction)
 
 
 if __name__ == "__main__":

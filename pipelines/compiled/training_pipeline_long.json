@@ -1,19 +1,25 @@
 {
   "components": {
-    "comp-prediction-task": {
-      "executorLabel": "exec-prediction-task",
+    "comp-training-task": {
+      "executorLabel": "exec-training-task",
       "inputDefinitions": {
         "parameters": {
+          "alpha": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
           "base_output_directory": {
-            "defaultValue": "gs://profitscout-lx6bb-pipeline-artifacts/inference/job-output",
+            "defaultValue": "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts",
             "isOptional": true,
             "parameterType": "STRING"
           },
-          "destination_table": {
+          "colsample_bytree": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "direction": {
             "parameterType": "STRING"
           },
           "display_name": {
-            "defaultValue": "profitscout-batch-prediction",
+            "defaultValue": "profitscout-high-gamma-training-job-long",
             "isOptional": true,
             "parameterType": "STRING"
           },
@@ -27,10 +33,16 @@
             "isOptional": true,
             "parameterType": "STRING"
           },
+          "gamma": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
           "labels": {
             "defaultValue": {},
             "isOptional": true,
             "parameterType": "STRUCT"
+          },
+          "learning_rate": {
+            "parameterType": "NUMBER_DOUBLE"
           },
           "location": {
             "defaultValue": "{{$.pipeline_google_cloud_location}}",
@@ -40,9 +52,6 @@
           "max_wait_duration": {
             "defaultValue": "86400s",
             "isOptional": true,
-            "parameterType": "STRING"
-          },
-          "model_base_dir": {
             "parameterType": "STRING"
           },
           "network": {
@@ -58,6 +67,9 @@
           "project": {
             "parameterType": "STRING"
           },
+          "reg_lambda": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
           "reserved_ip_ranges": {
             "defaultValue": [],
             "isOptional": true,
@@ -67,6 +79,9 @@
             "defaultValue": false,
             "isOptional": true,
             "parameterType": "BOOLEAN"
+          },
+          "scale_pos_weight": {
+            "parameterType": "NUMBER_DOUBLE"
           },
           "service_account": {
             "defaultValue": "",
@@ -100,30 +115,55 @@
                     "{{$.inputs.parameters['project']}}",
                     "--source-table",
                     "{{$.inputs.parameters['source_table']}}",
-                    "--destination-table",
-                    "{{$.inputs.parameters['destination_table']}}",
-                    "--model-base-dir",
-                    "{{$.inputs.parameters['model_base_dir']}}"
+                    "--direction",
+                    "{{$.inputs.parameters['direction']}}",
+                    "--xgb-max-depth",
+                    "{{$.inputs.parameters['xgb_max_depth']}}",
+                    "--learning-rate",
+                    "{{$.inputs.parameters['learning_rate']}}",
+                    "--xgb-min-child-weight",
+                    "{{$.inputs.parameters['xgb_min_child_weight']}}",
+                    "--xgb-subsample",
+                    "{{$.inputs.parameters['xgb_subsample']}}",
+                    "--colsample-bytree",
+                    "{{$.inputs.parameters['colsample_bytree']}}",
+                    "--gamma",
+                    "{{$.inputs.parameters['gamma']}}",
+                    "--alpha",
+                    "{{$.inputs.parameters['alpha']}}",
+                    "--reg-lambda",
+                    "{{$.inputs.parameters['reg_lambda']}}",
+                    "--scale-pos-weight",
+                    "{{$.inputs.parameters['scale_pos_weight']}}"
                   ],
                   "command": [
                     "python3",
                     "main.py"
                   ],
                   "env": [],
-                  "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/profitscout-predictor:latest"
+                  "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/profitscout-trainer:latest"
                 },
                 "disk_spec": {
                   "boot_disk_size_gb": 100.0,
                   "boot_disk_type": "pd-ssd"
                 },
                 "machine_spec": {
-                  "machine_type": "n1-standard-8"
+                  "machine_type": "n1-standard-16"
                 },
                 "replica_count": 1.0
               }
             ],
             "isOptional": true,
             "parameterType": "LIST"
+          },
+          "xgb_max_depth": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "xgb_min_child_weight": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "xgb_subsample": {
+            "parameterType": "NUMBER_DOUBLE"
           }
         }
       },
@@ -136,10 +176,10 @@
       }
     }
   },
-  "defaultPipelineRoot": "gs://profitscout-lx6bb-pipeline-artifacts/inference",
+  "defaultPipelineRoot": "gs://profitscout-lx6bb-pipeline-artifacts/training",
   "deploymentSpec": {
     "executors": {
-      "exec-prediction-task": {
+      "exec-training-task": {
         "container": {
           "args": [
             "--type",
@@ -165,62 +205,123 @@
     }
   },
   "pipelineInfo": {
-    "description": "Generate High Gamma predictions for all tickers.",
-    "name": "profitscout-daily-prediction-pipeline"
+    "description": "Train High Gamma Classification Model (XGBoost) for LONG direction on Vertex AI.",
+    "name": "profitscout-high-gamma-training-pipeline-long"
   },
   "root": {
     "dag": {
       "tasks": {
-        "prediction-task": {
+        "training-task": {
           "cachingOptions": {
             "enableCache": true
           },
           "componentRef": {
-            "name": "comp-prediction-task"
+            "name": "comp-training-task"
           },
           "inputs": {
             "parameters": {
-              "destination_table": {
-                "componentInputParameter": "destination_table"
+              "alpha": {
+                "componentInputParameter": "alpha"
               },
-              "model_base_dir": {
-                "componentInputParameter": "model_base_dir"
+              "colsample_bytree": {
+                "componentInputParameter": "colsample_bytree"
+              },
+              "direction": {
+                "runtimeValue": {
+                  "constant": "LONG"
+                }
+              },
+              "gamma": {
+                "componentInputParameter": "gamma"
+              },
+              "learning_rate": {
+                "componentInputParameter": "learning_rate"
               },
               "project": {
                 "componentInputParameter": "project"
               },
+              "reg_lambda": {
+                "componentInputParameter": "reg_lambda"
+              },
+              "scale_pos_weight": {
+                "componentInputParameter": "scale_pos_weight"
+              },
               "source_table": {
                 "componentInputParameter": "source_table"
+              },
+              "xgb_max_depth": {
+                "componentInputParameter": "xgb_max_depth"
+              },
+              "xgb_min_child_weight": {
+                "componentInputParameter": "xgb_min_child_weight"
+              },
+              "xgb_subsample": {
+                "componentInputParameter": "xgb_subsample"
               }
             }
           },
           "taskInfo": {
-            "name": "prediction-task"
+            "name": "training-task"
           }
         }
       }
     },
     "inputDefinitions": {
       "parameters": {
-        "destination_table": {
-          "defaultValue": "profit_scout.daily_predictions",
+        "alpha": {
+          "defaultValue": 0.5,
           "isOptional": true,
-          "parameterType": "STRING"
+          "parameterType": "NUMBER_DOUBLE"
         },
-        "model_base_dir": {
-          "defaultValue": "gs://profitscout-lx6bb-pipeline-artifacts/production/model",
+        "colsample_bytree": {
+          "defaultValue": 0.7,
           "isOptional": true,
-          "parameterType": "STRING"
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "gamma": {
+          "defaultValue": 2.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "learning_rate": {
+          "defaultValue": 0.06,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
         },
         "project": {
           "defaultValue": "profitscout-lx6bb",
           "isOptional": true,
           "parameterType": "STRING"
         },
+        "reg_lambda": {
+          "defaultValue": 2.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
+        "scale_pos_weight": {
+          "defaultValue": 0.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
+        },
         "source_table": {
           "defaultValue": "profit_scout.price_data",
           "isOptional": true,
           "parameterType": "STRING"
+        },
+        "xgb_max_depth": {
+          "defaultValue": 6.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "xgb_min_child_weight": {
+          "defaultValue": 12.0,
+          "isOptional": true,
+          "parameterType": "NUMBER_INTEGER"
+        },
+        "xgb_subsample": {
+          "defaultValue": 0.7,
+          "isOptional": true,
+          "parameterType": "NUMBER_DOUBLE"
         }
       }
     }
