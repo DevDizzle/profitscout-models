@@ -261,12 +261,12 @@ def main():
             # Mark strict sniper prediction
             dir_df["prediction"] = (probs > threshold).astype(int)
             
-            # Take Top 50 by probability, regardless of threshold
+            # Take Top 10 by probability, regardless of threshold
             # (Users want to see the best available, even if confidence is lower than ideal)
-            top_50_df = dir_df.sort_values("prob", ascending=False).head(50).copy()
+            top_10_df = dir_df.sort_values("prob", ascending=False).head(10).copy()
             
-            logging.info("Direction %s: Selected top %d tickers.", direction, len(top_50_df))
-            all_predictions.append(top_50_df)
+            logging.info("Direction %s: Selected top %d tickers.", direction, len(top_10_df))
+            all_predictions.append(top_10_df)
             
         except Exception as e:
             logging.error("Failed to process %s model: %s", direction, e)
