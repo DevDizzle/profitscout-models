@@ -15,6 +15,9 @@
           "colsample_bytree": {
             "parameterType": "NUMBER_DOUBLE"
           },
+          "direction": {
+            "parameterType": "STRING"
+          },
           "display_name": {
             "defaultValue": "profitscout-high-gamma-training-job",
             "isOptional": true,
@@ -112,6 +115,8 @@
                     "{{$.inputs.parameters['project']}}",
                     "--source-table",
                     "{{$.inputs.parameters['source_table']}}",
+                    "--direction",
+                    "{{$.inputs.parameters['direction']}}",
                     "--xgb-max-depth",
                     "{{$.inputs.parameters['xgb_max_depth']}}",
                     "--learning-rate",
@@ -136,7 +141,182 @@
                     "main.py"
                   ],
                   "env": [],
-                  "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/trainer:latest"
+                  "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/profitscout-trainer:latest"
+                },
+                "disk_spec": {
+                  "boot_disk_size_gb": 100.0,
+                  "boot_disk_type": "pd-ssd"
+                },
+                "machine_spec": {
+                  "machine_type": "n1-standard-16"
+                },
+                "replica_count": 1.0
+              }
+            ],
+            "isOptional": true,
+            "parameterType": "LIST"
+          },
+          "xgb_max_depth": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "xgb_min_child_weight": {
+            "parameterType": "NUMBER_INTEGER"
+          },
+          "xgb_subsample": {
+            "parameterType": "NUMBER_DOUBLE"
+          }
+        }
+      },
+      "outputDefinitions": {
+        "parameters": {
+          "gcp_resources": {
+            "parameterType": "STRING"
+          }
+        }
+      }
+    },
+    "comp-training-task-2": {
+      "executorLabel": "exec-training-task-2",
+      "inputDefinitions": {
+        "parameters": {
+          "alpha": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "base_output_directory": {
+            "defaultValue": "gs://profitscout-lx6bb-pipeline-artifacts/training/model-artifacts",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "colsample_bytree": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "direction": {
+            "parameterType": "STRING"
+          },
+          "display_name": {
+            "defaultValue": "profitscout-high-gamma-training-job",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "enable_web_access": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "encryption_spec_key_name": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "gamma": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "labels": {
+            "defaultValue": {},
+            "isOptional": true,
+            "parameterType": "STRUCT"
+          },
+          "learning_rate": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "location": {
+            "defaultValue": "{{$.pipeline_google_cloud_location}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "max_wait_duration": {
+            "defaultValue": "86400s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "network": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "persistent_resource_id": {
+            "defaultValue": "{{$.pipeline_persistent_resource_id}}",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "project": {
+            "parameterType": "STRING"
+          },
+          "reg_lambda": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "reserved_ip_ranges": {
+            "defaultValue": [],
+            "isOptional": true,
+            "parameterType": "LIST"
+          },
+          "restart_job_on_worker_restart": {
+            "defaultValue": false,
+            "isOptional": true,
+            "parameterType": "BOOLEAN"
+          },
+          "scale_pos_weight": {
+            "parameterType": "NUMBER_DOUBLE"
+          },
+          "service_account": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "source_table": {
+            "parameterType": "STRING"
+          },
+          "strategy": {
+            "defaultValue": "STANDARD",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "tensorboard": {
+            "defaultValue": "",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "timeout": {
+            "defaultValue": "604800s",
+            "isOptional": true,
+            "parameterType": "STRING"
+          },
+          "worker_pool_specs": {
+            "defaultValue": [
+              {
+                "container_spec": {
+                  "args": [
+                    "--project-id",
+                    "{{$.inputs.parameters['project']}}",
+                    "--source-table",
+                    "{{$.inputs.parameters['source_table']}}",
+                    "--direction",
+                    "{{$.inputs.parameters['direction']}}",
+                    "--xgb-max-depth",
+                    "{{$.inputs.parameters['xgb_max_depth']}}",
+                    "--learning-rate",
+                    "{{$.inputs.parameters['learning_rate']}}",
+                    "--xgb-min-child-weight",
+                    "{{$.inputs.parameters['xgb_min_child_weight']}}",
+                    "--xgb-subsample",
+                    "{{$.inputs.parameters['xgb_subsample']}}",
+                    "--colsample-bytree",
+                    "{{$.inputs.parameters['colsample_bytree']}}",
+                    "--gamma",
+                    "{{$.inputs.parameters['gamma']}}",
+                    "--alpha",
+                    "{{$.inputs.parameters['alpha']}}",
+                    "--reg-lambda",
+                    "{{$.inputs.parameters['reg_lambda']}}",
+                    "--scale-pos-weight",
+                    "{{$.inputs.parameters['scale_pos_weight']}}"
+                  ],
+                  "command": [
+                    "python3",
+                    "main.py"
+                  ],
+                  "env": [],
+                  "image_uri": "us-central1-docker.pkg.dev/profitscout-lx6bb/profit-scout-repo/profitscout-trainer:latest"
                 },
                 "disk_spec": {
                   "boot_disk_size_gb": 100.0,
@@ -196,11 +376,34 @@
           ],
           "image": "gcr.io/ml-pipeline/google-cloud-pipeline-components:2.20.1"
         }
+      },
+      "exec-training-task-2": {
+        "container": {
+          "args": [
+            "--type",
+            "CustomJob",
+            "--payload",
+            "{\"display_name\": \"{{$.inputs.parameters['display_name']}}\", \"job_spec\": {\"worker_pool_specs\": {{$.inputs.parameters['worker_pool_specs']}}, \"scheduling\": {\"timeout\": \"{{$.inputs.parameters['timeout']}}\", \"restart_job_on_worker_restart\": {{$.inputs.parameters['restart_job_on_worker_restart']}}, \"strategy\": \"{{$.inputs.parameters['strategy']}}\", \"max_wait_duration\": \"{{$.inputs.parameters['max_wait_duration']}}\"}, \"service_account\": \"{{$.inputs.parameters['service_account']}}\", \"tensorboard\": \"{{$.inputs.parameters['tensorboard']}}\", \"enable_web_access\": {{$.inputs.parameters['enable_web_access']}}, \"network\": \"{{$.inputs.parameters['network']}}\", \"reserved_ip_ranges\": {{$.inputs.parameters['reserved_ip_ranges']}}, \"base_output_directory\": {\"output_uri_prefix\": \"{{$.inputs.parameters['base_output_directory']}}\"}, \"persistent_resource_id\": \"{{$.inputs.parameters['persistent_resource_id']}}\"}, \"labels\": {{$.inputs.parameters['labels']}}, \"encryption_spec\": {\"kms_key_name\": \"{{$.inputs.parameters['encryption_spec_key_name']}}\"}}",
+            "--project",
+            "{{$.inputs.parameters['project']}}",
+            "--location",
+            "{{$.inputs.parameters['location']}}",
+            "--gcp_resources",
+            "{{$.outputs.parameters['gcp_resources'].output_file}}"
+          ],
+          "command": [
+            "python3",
+            "-u",
+            "-m",
+            "google_cloud_pipeline_components.container.v1.custom_job.launcher"
+          ],
+          "image": "gcr.io/ml-pipeline/google-cloud-pipeline-components:2.20.1"
+        }
       }
     }
   },
   "pipelineInfo": {
-    "description": "Train High Gamma Classification Model (XGBoost) on Vertex AI.",
+    "description": "Train High Gamma Classification Model (XGBoost) for BOTH Long and Short directions.",
     "name": "profitscout-high-gamma-training-pipeline"
   },
   "root": {
@@ -220,6 +423,11 @@
               },
               "colsample_bytree": {
                 "componentInputParameter": "colsample_bytree"
+              },
+              "direction": {
+                "runtimeValue": {
+                  "constant": "LONG"
+                }
               },
               "gamma": {
                 "componentInputParameter": "gamma"
@@ -251,7 +459,60 @@
             }
           },
           "taskInfo": {
-            "name": "training-task"
+            "name": "Train Long Model"
+          }
+        },
+        "training-task-2": {
+          "cachingOptions": {
+            "enableCache": true
+          },
+          "componentRef": {
+            "name": "comp-training-task-2"
+          },
+          "inputs": {
+            "parameters": {
+              "alpha": {
+                "componentInputParameter": "alpha"
+              },
+              "colsample_bytree": {
+                "componentInputParameter": "colsample_bytree"
+              },
+              "direction": {
+                "runtimeValue": {
+                  "constant": "SHORT"
+                }
+              },
+              "gamma": {
+                "componentInputParameter": "gamma"
+              },
+              "learning_rate": {
+                "componentInputParameter": "learning_rate"
+              },
+              "project": {
+                "componentInputParameter": "project"
+              },
+              "reg_lambda": {
+                "componentInputParameter": "reg_lambda"
+              },
+              "scale_pos_weight": {
+                "componentInputParameter": "scale_pos_weight"
+              },
+              "source_table": {
+                "componentInputParameter": "source_table"
+              },
+              "xgb_max_depth": {
+                "componentInputParameter": "xgb_max_depth"
+              },
+              "xgb_min_child_weight": {
+                "componentInputParameter": "xgb_min_child_weight"
+              },
+              "xgb_subsample": {
+                "componentInputParameter": "xgb_subsample"
+              }
+            }
+          },
+          "taskInfo": {
+            "name": "Train Short Model"
           }
         }
       }

@@ -1,6 +1,6 @@
 {
   "displayName": "profitscout-daily-inference",
-  "cron": "30 23 * * 1-5",
+  "cron": "0 22 * * 1-5",
   "maxConcurrentRunCount": "1",
   "createPipelineJobRequest": {
     "parent": "projects/profitscout-lx6bb/locations/us-central1",

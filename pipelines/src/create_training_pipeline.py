@@ -2,6 +2,7 @@
 # FILE: training_pipeline.py
 """
 Compiles the ProfitScout High-Gamma Training Pipeline.
+Runs both LONG and SHORT training jobs in parallel.
 """
 
 from kfp import dsl, compiler
@@ -55,56 +56,74 @@ def training_task(
         ],
     )
 
+# Create the training op *outside* the pipeline func
+# We can use a generic display name, or dynamic. 
+# Since we want to use the same op for both, we keep it generic here, 
+# but the custom job service will append the run name.
+# Actually, 'create_custom_training_job_from_component' returns a task factory.
+training_op_component = create_custom_training_job_from_component(
+    component_spec=training_task,
+    display_name="profitscout-high-gamma-training-job",
+    machine_type="n1-standard-16",
+    replica_count=1,
+    base_output_directory=MODEL_ARTIFACT_DIR,
+)
 
-def _compile_and_upload_pipeline(direction: str):
-    # Dynamically define the training_op display name
-    training_op_display_name = f"profitscout-high-gamma-training-job-{direction.lower()}"
-    
-    training_op_component = create_custom_training_job_from_component(
-        component_spec=training_task,
-        display_name=training_op_display_name,
-        machine_type="n1-standard-16",
-        replica_count=1,
-        base_output_directory=MODEL_ARTIFACT_DIR,
-    )
+# ───────────────── Pipeline ─────────────────
+@dsl.pipeline(
+    name="profitscout-high-gamma-training-pipeline",
+    description="Train High Gamma Classification Model (XGBoost) for BOTH Long and Short directions.",
+    pipeline_root=PIPELINE_ROOT,
+)
+def training_pipeline(
+    project: str = PROJECT_ID,
+    source_table: str = "profit_scout.price_data",
+    xgb_max_depth: int = 6,
+    learning_rate: float = 0.06,
+    xgb_min_child_weight: int = 12,
+    xgb_subsample: float = 0.7,
+    colsample_bytree: float = 0.7,
+    gamma: float = 2.0,
+    alpha: float = 0.5,
+    reg_lambda: float = 2.0,
+    scale_pos_weight: float = 0.0, # 0.0 = auto
+):
+    # Long Direction
+    training_op_component(
+        project=project,
+        source_table=source_table,
+        direction="LONG",
+        xgb_max_depth=xgb_max_depth,
+        learning_rate=learning_rate,
+        xgb_min_child_weight=xgb_min_child_weight,
+        xgb_subsample=xgb_subsample,
+        colsample_bytree=colsample_bytree,
+        gamma=gamma,
+        alpha=alpha,
+        reg_lambda=reg_lambda,
+        scale_pos_weight=scale_pos_weight,
+    ).set_display_name("Train Long Model")
 
-    # Dynamically define the pipeline
-    @dsl.pipeline(
-        name=f"profitscout-high-gamma-training-pipeline-{direction.lower()}",
-        description=f"Train High Gamma Classification Model (XGBoost) for {direction} direction on Vertex AI.",
-        pipeline_root=PIPELINE_ROOT,
-    )
-    def training_pipeline(
-        project: str = PROJECT_ID,
-        source_table: str = "profit_scout.price_data",
-        # Default direction is now fixed per compiled pipeline
-        xgb_max_depth: int = 6,
-        learning_rate: float = 0.06,
-        xgb_min_child_weight: int = 12,
-        xgb_subsample: float = 0.7,
-        colsample_bytree: float = 0.7,
-        gamma: float = 2.0,
-        alpha: float = 0.5,
-        reg_lambda: float = 2.0,
-        scale_pos_weight: float = 0.0, # 0.0 = auto
-    ):
-        training_op_component(
-            project=project,
-            source_table=source_table,
-            direction=direction, # Pass the fixed direction here
-            xgb_max_depth=xgb_max_depth,
-            learning_rate=learning_rate,
-            xgb_min_child_weight=xgb_min_child_weight,
-            xgb_subsample=xgb_subsample,
-            colsample_bytree=colsample_bytree,
-            gamma=gamma,
-            alpha=alpha,
-            reg_lambda=reg_lambda,
-            scale_pos_weight=scale_pos_weight,
-        )
+    # Short Direction
+    training_op_component(
+        project=project,
+        source_table=source_table,
+        direction="SHORT",
+        xgb_max_depth=xgb_max_depth,
+        learning_rate=learning_rate,
+        xgb_min_child_weight=xgb_min_child_weight,
+        xgb_subsample=xgb_subsample,
+        colsample_bytree=colsample_bytree,
+        gamma=gamma,
+        alpha=alpha,
+        reg_lambda=reg_lambda,
+        scale_pos_weight=scale_pos_weight,
+    ).set_display_name("Train Short Model")
 
-    local_path = f"pipelines/compiled/training_pipeline_{direction.lower()}.json"
-    gcs_path = f"{PIPELINE_ROOT}/training_pipeline_{direction.lower()}.json"
+# ───────────────── Compile and Upload ─────────────────
+if __name__ == "__main__":
+    local_path = "pipelines/compiled/training_pipeline.json"
+    gcs_path = f"{PIPELINE_ROOT}/training_pipeline.json"
 
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
@@ -119,8 +138,3 @@ def _compile_and_upload_pipeline(direction: str):
         print(f"✓ Uploaded to {gcs_path}")
     except subprocess.CalledProcessError as e:
         print(f"✗ GCS upload failed: {e}")
-
-# ───────────────── Compile and Upload ─────────────────
-if __name__ == "__main__":
-    _compile_and_upload_pipeline("LONG")
-    _compile_and_upload_pipeline("SHORT")

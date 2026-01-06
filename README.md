@@ -19,8 +19,8 @@ The core innovation of ProfitScout is its **Dynamic Thresholding** system. Most 
     *   **ProfitScout Precision (at Threshold):** **~36%**
     *   *Implication:* When the model pulls the trigger, the odds of a massive (>0.5 ATR) move trip by **3x**.
 
-### The "Daily 50"
-Every evening, the system scans the entire market (~1,500 tickers) and delivers a ranked list of the **Top 50** setups.
+### The "Daily Picks"
+Every evening, the system scans the entire market (~1,500 tickers) and delivers a ranked list of the **Top 20** setups (10 Calls, 10 Puts).
 *   **Tier 1 (Sniper):** Probability > 0.814. These are the "Fat Pitches."
 *   **Tier 2 (Watchlist):** Top ranked but < 0.814. Good setups, but require manual confirmation.
 
@@ -45,13 +45,13 @@ The model does not care about "company fundamentals." It only cares about **Pric
 
 The system runs autonomously on Google Cloud Vertex AI.
 
-### 1. Daily Inference (Mon-Fri @ 6:30 PM EST)
+### 1. Daily Inference (Mon-Fri @ 5:00 PM EST)
 *   **Trigger:** Market Close.
 *   **Process:**
     1.  Loads fresh OHLCV data from BigQuery.
     2.  Engineers features for the *latest* trading day.
     3.  Applies the "Golden" model and thresholds.
-    4.  Saves the **Top 50** picks to BigQuery: `profit_scout.daily_predictions`.
+    4.  Saves the **Top 20** picks to BigQuery: `profit_scout.daily_predictions`.
 
 ### 2. Weekly Retraining (Sun @ 9:00 AM EST)
 *   **Trigger:** Weekly Reset.

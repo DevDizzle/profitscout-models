@@ -15,19 +15,24 @@ def create_schedule(
 ):
     print(f"Creating schedule: {display_name}...")
     
-    # Define the pipeline job specification
-    # We use .from_pipeline_func logic essentially, but here we just point to the JSON
-    
-    schedule = aiplatform.Schedule.create(
+    # Create the PipelineJob object
+    pipeline_job = aiplatform.PipelineJob(
         display_name=display_name,
+        template_path=template_path,
+        pipeline_root=pipeline_root,
+        parameter_values=parameter_values,
+        enable_caching=False
+    )
+
+    # Create the PipelineJobSchedule wrapper
+    schedule = aiplatform.PipelineJobSchedule(
+        pipeline_job=pipeline_job,
+        display_name=display_name
+    )
+    
+    # Submit the creation request
+    schedule.create(
         cron=cron_expression,
-        pipeline_job=aiplatform.PipelineJob(
-            display_name=display_name,
-            template_path=template_path,
-            pipeline_root=pipeline_root,
-            parameter_values=parameter_values,
-            enable_caching=False
-        ),
         max_concurrent_run_count=1
     )
     
@@ -35,24 +40,26 @@ def create_schedule(
     return schedule
 
 if __name__ == "__main__":
-    # 1. Inference Schedule: Mon-Fri at 6:30 PM EST (23:30 UTC)
-    # Cron: "30 23 * * 1-5"
-    create_schedule(
-        display_name="profitscout-daily-inference",
-        cron_expression="30 23 * * 1-5", 
-        template_path=f"{BUCKET}/inference/inference_pipeline.json",
-        pipeline_root=f"{BUCKET}/inference",
-        parameter_values={
-            "project": PROJECT_ID,
-            "source_table": "profit_scout.price_data",
-            "destination_table": "profit_scout.daily_predictions",
-            # Point to the stable production path
-            "model_dir": f"{BUCKET}/production/model"
-        }
-    )
+    # 1. Inference Schedule: Mon-Fri at 5:00 PM EST (22:00 UTC)
+    # Cron: "0 22 * * 1-5"
+    # create_schedule(
+    #     display_name="profitscout-daily-inference",
+    #     cron_expression="0 22 * * 1-5", 
+    #     template_path=f"{BUCKET}/inference/inference_pipeline.json",
+    #     pipeline_root=f"{BUCKET}/inference",
+    #     parameter_values={
+    #         "project": PROJECT_ID,
+    #         "source_table": "profit_scout.price_data",
+    #         "destination_table": "profit_scout.daily_predictions",
+    #         # Point to the stable production path
+    #         "model_base_dir": f"{BUCKET}/production/model"
+    #     }
+    # )
 
     # 2. Training Schedule: Every Sunday at 2:00 PM UTC (9:00 AM EST)
     # Cron: "0 14 * * 0"
+    # Note: If this schedule already exists, it will duplicate unless cleaned up first.
+    # For now, we allow it or user should clean it up if needed.
     create_schedule(
         display_name="profitscout-weekly-training",
         cron_expression="0 14 * * 0",
